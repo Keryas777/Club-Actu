@@ -3,5 +3,16 @@
   "name": "club-actu",
   "main": "src/index.js",
   "compatibility_date": "2026-08-29",
-  "workers_dev": true
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "club-actu-db",
+      "database_id": "2f046f01-aac7-4a0f-9572-0476f9678c8f",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/30 * * * *"]
+  }
 }
