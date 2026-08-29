@@ -144,6 +144,8 @@ function looksLikeArticleTitle(title = "") {
 
 function discoverLinks(html, adapter) {
   const found = new Map();
+
+  // 1) Normal HTML anchors.
   const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html))) {
@@ -159,6 +161,31 @@ function discoverLinks(html, adapter) {
     if (!found.has(canonical)) found.set(canonical, { url: canonical, title });
     if (found.size >= 50) break;
   }
+
+  // 2) Client-rendered sites often embed routes in JSON/script payloads even
+  // when no useful <a> tags exist in the server-rendered shell.
+  if (adapter.discoveryMode === "embedded_routes" && found.size < 50) {
+    const routeRe = /(?:https?:\\?\/\\?\/www\.ol\.fr)?\\?\/fr\\?\/actualites\\?\/([a-z0-9][a-z0-9-]{5,})/gi;
+    let rm;
+    while ((rm = routeRe.exec(html))) {
+      const slug = rm[1];
+      const url = `https://www.ol.fr/fr/actualites/${slug}`;
+      if (!looksLikeArticleUrl(url, adapter)) continue;
+
+      // We may not have the card title in the embedded payload. Use a readable
+      // slug-derived placeholder; full extraction will replace it later.
+      const title = slug
+        .split("-")
+        .filter(Boolean)
+        .map((part) => part.length <= 3 ? part.toUpperCase() : part)
+        .join(" ");
+
+      const canonical = canonicalize(url);
+      if (!found.has(canonical)) found.set(canonical, { url: canonical, title });
+      if (found.size >= 50) break;
+    }
+  }
+
   return [...found.values()];
 }
 
