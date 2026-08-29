@@ -1,10 +1,11 @@
-import { collectAll } from "./collector.js";
+import { collectAll, repairMojibake } from "./collector.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
     ...init,
     headers: {
       "Cache-Control": "no-store",
+      "Content-Type": "application/json; charset=utf-8",
       ...(init.headers || {})
     }
   });
@@ -18,6 +19,28 @@ function parseLimit(url, fallback = 25, max = 100) {
 
 async function handleApi(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+
+  if (url.pathname === "/api/debug/encoding" && request.method === "GET") {
+    const samples = [
+      "entraÃ®neur",
+      "lâ€™Ã¨re",
+      "rÃ©cente",
+      "dâ€™innover"
+    ];
+
+    return json({
+      ok: true,
+      samples: samples.map((input) => {
+        const output = repairMojibake(input);
+        return {
+          input,
+          output,
+          input_codepoints: [...input].map((c) => c.codePointAt(0).toString(16)),
+          output_codepoints: [...output].map((c) => c.codePointAt(0).toString(16))
+        };
+      })
+    });
+  }
 
   if (url.pathname === "/api/sources" && request.method === "GET") {
     const { results } = await env.DB.prepare(
