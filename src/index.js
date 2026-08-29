@@ -42,6 +42,60 @@ async function handleApi(request, env, url) {
     });
   }
 
+
+  if (url.pathname === "/api/collection-audit" && request.method === "GET") {
+    const limit = parseLimit(url, 20, 100);
+
+    const latestRun = await env.DB.prepare(
+      `SELECT id, started_at, finished_at, status, notes
+       FROM collection_runs
+       ORDER BY started_at DESC
+       LIMIT 1`
+    ).first();
+
+    let details = [];
+    try {
+      details = latestRun?.notes ? JSON.parse(latestRun.notes) : [];
+    } catch {
+      details = [];
+    }
+
+    const { results: recent } = await env.DB.prepare(
+      `SELECT source_id, canonical_url AS url, title, first_seen_at, last_seen_at
+       FROM raw_articles
+       ORDER BY last_seen_at DESC
+       LIMIT ?`
+    ).bind(limit).all();
+
+    const { results: suspicious } = await env.DB.prepare(
+      `SELECT source_id, canonical_url AS url, title, last_seen_at
+       FROM raw_articles
+       WHERE
+         lower(title) IN ('se connecter','connexion','accueil','calendrier','classement')
+         OR lower(title) LIKE 'calendrier%'
+         OR lower(title) LIKE 'classement%'
+         OR lower(canonical_url) LIKE '%/login%'
+         OR lower(canonical_url) LIKE '%/connexion%'
+         OR lower(canonical_url) LIKE '%/calendrier%'
+         OR lower(canonical_url) LIKE '%/classement%'
+       ORDER BY last_seen_at DESC
+       LIMIT 100`
+    ).all();
+
+    return json({
+      ok: true,
+      latest_run: latestRun ? {
+        id: latestRun.id,
+        started_at: latestRun.started_at,
+        finished_at: latestRun.finished_at,
+        status: latestRun.status,
+        source_details: details
+      } : null,
+      recent_articles: recent,
+      suspicious_legacy_rows: suspicious
+    });
+  }
+
   if (url.pathname === "/api/sources" && request.method === "GET") {
     const { results } = await env.DB.prepare(
       `SELECT s.*, cs.relation_type, cs.priority
