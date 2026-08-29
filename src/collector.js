@@ -114,6 +114,34 @@ async function fetchText(url, timeoutMs = 12000) {
   }
 }
 
+function looksLikeArticleUrl(url, adapter) {
+  const u = new URL(url);
+  const path = u.pathname.replace(/\/+$/, "") || "/";
+
+  // Source-specific rules stay authoritative where the site's article URL
+  // structure is known.
+  if (adapter.articlePath) return adapter.articlePath.test(path);
+
+  // Generic guardrails for navigation/account/index pages.
+  if (path === "/") return false;
+  if (/\/(?:login|connexion|connecter|compte|account|abonnement|newsletter|contact|mentions-legales|politique-de-confidentialite|privacy|cookies?|classement|calendrier|resultats?|equipe|effectif|billetterie|boutique)(?:\/|$)/i.test(path)) {
+    return false;
+  }
+
+  const segments = path.split("/").filter(Boolean);
+  const slug = segments[segments.length - 1] || "";
+  const hasArticleId = /(?:^|[-_])\d{4,}(?:\.[a-z]+)?$/i.test(slug) || /\d{5,}/.test(slug);
+  const longSlug = slug.length >= 24 && (slug.match(/-/g) || []).length >= 3;
+  return hasArticleId || longSlug;
+}
+
+function looksLikeArticleTitle(title = "") {
+  const t = title.trim();
+  if (t.length < 18) return false;
+  if (/^(?:se connecter|connexion|accueil|calendrier|classement|résultats?|effectif|équipe|billetterie|boutique|newsletter|contact)(?:\b|\s|\/|-)/i.test(t)) return false;
+  return true;
+}
+
 function discoverLinks(html, adapter) {
   const found = new Map();
   const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -124,8 +152,9 @@ function discoverLinks(html, adapter) {
     const u = new URL(url);
     if (!adapter.articleHosts.includes(u.hostname)) continue;
     if (adapter.includePath && !adapter.includePath.test(u.pathname)) continue;
+    if (!looksLikeArticleUrl(url, adapter)) continue;
     const title = stripTags(m[2]);
-    if (!title || title.length < 12) continue;
+    if (!looksLikeArticleTitle(title)) continue;
     const canonical = canonicalize(url);
     if (!found.has(canonical)) found.set(canonical, { url: canonical, title });
     if (found.size >= 50) break;
