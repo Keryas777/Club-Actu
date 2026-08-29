@@ -134,8 +134,9 @@ function discoverLinks(html, adapter) {
 }
 
 async function upsertArticle(db, sourceId, item, now) {
+  const normalizedTitle = repairMojibake(item.title || "");
   const id = await sha256Hex(sourceId + "|" + item.url);
-  const contentHash = await sha256Hex(item.title || item.url);
+  const contentHash = await sha256Hex(normalizedTitle || item.url);
 
   const existing = await db.prepare(
     "SELECT id, content_hash FROM raw_articles WHERE source_id = ? AND canonical_url = ?"
@@ -147,27 +148,27 @@ async function upsertArticle(db, sourceId, item, now) {
       (id, source_id, url, canonical_url, title, content_level, discovery_method,
        first_seen_at, last_seen_at, content_hash, processing_status)
        VALUES (?, ?, ?, ?, ?, 'metadata', 'html_links', ?, ?, ?, 'raw')`
-    ).bind(id, sourceId, item.url, item.url, item.title, now, now, contentHash).run();
+    ).bind(id, sourceId, item.url, item.url, normalizedTitle, now, now, contentHash).run();
 
     await db.prepare(
       `INSERT OR IGNORE INTO article_versions
        (article_id, content_hash, title, captured_at)
        VALUES (?, ?, ?, ?)`
-    ).bind(id, contentHash, item.title, now).run();
+    ).bind(id, contentHash, normalizedTitle, now).run();
 
     return "inserted";
   }
 
   await db.prepare(
     "UPDATE raw_articles SET last_seen_at = ?, title = ?, content_hash = ? WHERE id = ?"
-  ).bind(now, item.title, contentHash, existing.id).run();
+  ).bind(now, normalizedTitle, contentHash, existing.id).run();
 
   if (existing.content_hash !== contentHash) {
     await db.prepare(
       `INSERT OR IGNORE INTO article_versions
        (article_id, content_hash, title, captured_at)
        VALUES (?, ?, ?, ?)`
-    ).bind(existing.id, contentHash, item.title, now).run();
+    ).bind(existing.id, contentHash, normalizedTitle, now).run();
   }
 
   return "updated";
