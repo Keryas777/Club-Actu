@@ -11,7 +11,7 @@ const CP1252_REVERSE = new Map([
   ["ž", 0x9E], ["Ÿ", 0x9F]
 ]);
 
-function repairMojibake(text = "") {
+function repairMojibakeOnce(text = "") {
   const s = String(text);
   if (!/[ÃÂâ]/.test(s)) return s;
 
@@ -34,6 +34,16 @@ function repairMojibake(text = "") {
   } catch {
     return s;
   }
+}
+
+function repairMojibake(text = "") {
+  let current = String(text);
+  for (let i = 0; i < 3; i++) {
+    const repaired = repairMojibakeOnce(current);
+    if (repaired === current) break;
+    current = repaired;
+  }
+  return current;
 }
 
 function decodeEntities(text = "") {
