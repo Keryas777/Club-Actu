@@ -30,4 +30,4 @@ L'Olympique Lyonnais est le premier club utilisé pour valider le pipeline.
 
 La collecte actuelle ne fait encore qu'une découverte de liens et de titres sur les sources explicitement activées. Elle ne réalise ni extraction intégrale d'articles, ni filtrage OL final, ni synthèse IA.
 
-<!-- Cloudflare deployment trigger: D1 pipeline validation -->
+<!-- Cloudflare deployment trigger: Git connection restored -->
