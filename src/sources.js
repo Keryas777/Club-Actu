@@ -3,7 +3,11 @@ export const SOURCE_ADAPTERS = {
     id: "ol_official",
     discoveryUrl: "https://www.ol.fr/",
     articleHosts: ["ol.fr", "www.ol.fr"],
-    includePath: /\/actualit/i
+    includePath: /\//i,
+    // ol.fr's homepage is heavily client-rendered, so plain HTML link discovery
+    // may return zero articles. Keep it enabled but do not pretend the source is
+    // healthy until a dedicated discovery method is added.
+    discoveryMode: "client_rendered"
   },
   olympique_et_lyonnais: {
     id: "olympique_et_lyonnais",
