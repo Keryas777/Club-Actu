@@ -2,16 +2,52 @@ import { listEnabledAdapters } from "./sources.js";
 
 const USER_AGENT = "ClubActuBot/0.1 (+https://github.com/Keryas777/Club-Actu)";
 
+const CP1252_REVERSE = new Map([
+  ["€", 0x80], ["‚", 0x82], ["ƒ", 0x83], ["„", 0x84], ["…", 0x85],
+  ["†", 0x86], ["‡", 0x87], ["ˆ", 0x88], ["‰", 0x89], ["Š", 0x8A],
+  ["‹", 0x8B], ["Œ", 0x8C], ["Ž", 0x8E], ["‘", 0x91], ["’", 0x92],
+  ["“", 0x93], ["”", 0x94], ["•", 0x95], ["–", 0x96], ["—", 0x97],
+  ["˜", 0x98], ["™", 0x99], ["š", 0x9A], ["›", 0x9B], ["œ", 0x9C],
+  ["ž", 0x9E], ["Ÿ", 0x9F]
+]);
+
+function repairMojibake(text = "") {
+  const s = String(text);
+  if (!/[ÃÂâ]/.test(s)) return s;
+
+  const bytes = [];
+  for (const ch of s) {
+    const code = ch.codePointAt(0);
+    if (code <= 0xFF) {
+      bytes.push(code);
+      continue;
+    }
+    const cp1252 = CP1252_REVERSE.get(ch);
+    if (cp1252 == null) return s;
+    bytes.push(cp1252);
+  }
+
+  try {
+    const repaired = new TextDecoder("utf-8", { fatal: true })
+      .decode(new Uint8Array(bytes));
+    return /\uFFFD/.test(repaired) ? s : repaired;
+  } catch {
+    return s;
+  }
+}
+
 function decodeEntities(text = "") {
-  return text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ")
-    .trim();
+  return repairMojibake(
+    text
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 function stripTags(html = "") {
