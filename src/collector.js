@@ -36,7 +36,7 @@ function repairMojibakeOnce(text = "") {
   }
 }
 
-function repairMojibake(text = "") {
+export function repairMojibake(text = "") {
   let current = String(text);
   for (let i = 0; i < 3; i++) {
     const repaired = repairMojibakeOnce(current);
