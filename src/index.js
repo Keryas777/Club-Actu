@@ -101,7 +101,20 @@ async function handleApi(request, env, url) {
   if (url.pathname === "/api/processing-status" && request.method === "GET") {
     const club = (url.searchParams.get("club") || "ol").trim() || "ol";
     const limit = parseLimit(url, 8, 20);
-    const diagnostics = await getProcessingDiagnostics(env.DB, club, limit);
+
+    const decisionRaw = (url.searchParams.get("decision") || "").trim();
+    const extractionStatusRaw = (url.searchParams.get("extraction_status") || "").trim();
+
+    const allowedDecisions = new Set(["relevant", "rejected", "needs_review"]);
+    const allowedExtractionStatuses = new Set(["completed", "retry", "failed"]);
+
+    const decision = allowedDecisions.has(decisionRaw) ? decisionRaw : null;
+    const extractionStatus = allowedExtractionStatuses.has(extractionStatusRaw) ? extractionStatusRaw : null;
+
+    const diagnostics = await getProcessingDiagnostics(env.DB, club, limit, {
+      decision,
+      extractionStatus
+    });
     return json({ ok: true, ...diagnostics });
   }
 
