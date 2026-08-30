@@ -342,7 +342,6 @@ async function loadCandidates(db, limit) {
            WHERE e.article_id = r.id
              AND e.source_content_hash = r.content_hash
              AND e.extractor_version = ?
-             AND e.status = 'completed'
          )
          OR EXISTS (
            SELECT 1 FROM article_extractions e
@@ -352,21 +351,30 @@ async function loadCandidates(db, limit) {
              AND e.status = 'retry'
              AND (e.retry_after IS NULL OR e.retry_after <= ?)
          )
-         OR EXISTS (
-           SELECT 1 FROM club_sources cs
-           WHERE cs.source_id = r.source_id
-             AND NOT EXISTS (
-               SELECT 1 FROM article_club_assessments a
-               WHERE a.article_id = r.id
-                 AND a.club_id = cs.club_id
-                 AND a.source_content_hash = r.content_hash
-                 AND a.rule_version = ?
-             )
+         OR (
+           EXISTS (
+             SELECT 1 FROM article_extractions e
+             WHERE e.article_id = r.id
+               AND e.source_content_hash = r.content_hash
+               AND e.extractor_version = ?
+               AND e.status = 'completed'
+           )
+           AND EXISTS (
+             SELECT 1 FROM club_sources cs
+             WHERE cs.source_id = r.source_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM article_club_assessments a
+                 WHERE a.article_id = r.id
+                   AND a.club_id = cs.club_id
+                   AND a.source_content_hash = r.content_hash
+                   AND a.rule_version = ?
+               )
+           )
          )
        )
      ORDER BY r.last_seen_at ASC
      LIMIT ?`
-  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), RULE_VERSION, limit).all();
+  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), EXTRACTOR_VERSION, RULE_VERSION, limit).all();
   return results || [];
 }
 
@@ -553,7 +561,6 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
            WHERE e.article_id = r.id
              AND e.source_content_hash = r.content_hash
              AND e.extractor_version = ?
-             AND e.status = 'completed'
          )
          OR EXISTS (
            SELECT 1 FROM article_extractions e
@@ -563,19 +570,28 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
              AND e.status = 'retry'
              AND (e.retry_after IS NULL OR e.retry_after <= ?)
          )
-         OR EXISTS (
-           SELECT 1 FROM club_sources cs
-           WHERE cs.source_id = r.source_id
-             AND NOT EXISTS (
-               SELECT 1 FROM article_club_assessments a
-               WHERE a.article_id = r.id
-                 AND a.club_id = cs.club_id
-                 AND a.source_content_hash = r.content_hash
-                 AND a.rule_version = ?
-             )
+         OR (
+           EXISTS (
+             SELECT 1 FROM article_extractions e
+             WHERE e.article_id = r.id
+               AND e.source_content_hash = r.content_hash
+               AND e.extractor_version = ?
+               AND e.status = 'completed'
+           )
+           AND EXISTS (
+             SELECT 1 FROM club_sources cs
+             WHERE cs.source_id = r.source_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM article_club_assessments a
+                 WHERE a.article_id = r.id
+                   AND a.club_id = cs.club_id
+                   AND a.source_content_hash = r.content_hash
+                   AND a.rule_version = ?
+               )
+           )
          )
        )`
-  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), RULE_VERSION).first();
+  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), EXTRACTOR_VERSION, RULE_VERSION).first();
 
   const counts = await db.prepare(
     `SELECT
