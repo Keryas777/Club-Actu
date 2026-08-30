@@ -134,6 +134,39 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        ol_article_api_probe: await (async () => {
+          try {
+            const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
+            const cfg = await cfgRes.json();
+            const apiUrl = String(cfg?.apiUrl || "").replace(/\/+$/, "");
+            const headers = { ...(cfg?.headers || {}), accept: "application/json,text/plain,*/*" };
+            const endpoints = [apiUrl + "/articles", apiUrl + "/articles/count"];
+            const results = [];
+            for (const endpoint of endpoints) {
+              try {
+                const rr = await fetch(endpoint, { redirect: "follow", headers });
+                const bb = await rr.text();
+                results.push({
+                  endpoint,
+                  status: rr.status,
+                  content_type: rr.headers.get("content-type") || "",
+                  length: bb.length,
+                  prefix: bb.slice(0, 1800)
+                });
+              } catch (error) {
+                results.push({ endpoint, error: String(error?.message || error) });
+              }
+            }
+            return {
+              ok: true,
+              api_url: apiUrl,
+              header_names: Object.keys(cfg?.headers || {}),
+              results
+            };
+          } catch (error) {
+            return { ok: false, error: String(error?.message || error) };
+          }
+        })(),
         ol_app_config_fetch: await (async () => {
           const urls = [
             "https://www.ol.fr/app-config.json",
