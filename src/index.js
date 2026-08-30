@@ -134,6 +134,31 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        runtime_config_snippets: await (async () => {
+          const snippets = [];
+          const terms = ["readConfig", "apiUrl", "config.json", "environment", "AppConfig", "appConfig"];
+          for (const file of files) {
+            if (!file.url || !file.looks_js) continue;
+            try {
+              const rr = await fetch(file.url, { redirect: "follow" });
+              const bb = await rr.text();
+              for (const term of terms) {
+                let from = 0;
+                while (snippets.length < 120) {
+                  const idx = bb.indexOf(term, from);
+                  if (idx < 0) break;
+                  snippets.push({
+                    file: file.url,
+                    term,
+                    snippet: bb.slice(Math.max(0, idx - 350), Math.min(bb.length, idx + 650))
+                  });
+                  from = idx + term.length;
+                }
+              }
+            } catch {}
+          }
+          return snippets;
+        })(),
         config_probe_results: await Promise.all(
           [
             "/assets/config/config.json",
