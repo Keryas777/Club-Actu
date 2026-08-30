@@ -7,7 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:migrate:remote": "wrangler d1 migrations apply club-actu-db --remote",
-    "db:migrate:local": "wrangler d1 migrations apply club-actu-db --local"
+    "db:migrate:local": "wrangler d1 migrations apply club-actu-db --local",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

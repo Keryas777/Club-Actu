@@ -1,0 +1,63 @@
+name: Phase A checks
+
+on:
+  push:
+    branches:
+      - "agent/**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/collector.js
+          node --check src/processor.js
+          node --check src/index.js
+          node --check src/sources.js
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Validate migrations from empty database
+        run: |
+          python3 - <<'PY'
+          import sqlite3
+          from pathlib import Path
+
+          db = sqlite3.connect(":memory:")
+          db.execute("PRAGMA foreign_keys = ON")
+          for path in sorted(Path("migrations").glob("*.sql")):
+              db.executescript(path.read_text(encoding="utf-8"))
+
+          expected = {
+              "clubs",
+              "sources",
+              "club_sources",
+              "raw_articles",
+              "article_versions",
+              "collection_runs",
+              "club_aliases",
+              "article_extractions",
+              "article_club_assessments",
+              "processing_runs",
+          }
+          actual = {
+              row[0]
+              for row in db.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table'"
+              )
+          }
+          missing = expected - actual
+          if missing:
+              raise SystemExit(f"Missing tables: {sorted(missing)}")
+
+          print("Migrations OK:", ", ".join(sorted(expected)))
+          PY
