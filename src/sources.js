@@ -1,11 +1,11 @@
 export const SOURCE_ADAPTERS = {
   ol_official: {
     id: "ol_official",
-    discoveryUrl: "https://www.ol.fr/fr/actualites",
-    articleHosts: ["ol.fr", "www.ol.fr"],
-    includePath: /^\/fr\/actualites\//i,
-    articlePath: /^\/fr\/actualites\/[^/?#]+\/?$/i,
-    discoveryMode: "embedded_routes"
+    discoveryMode: "ol_api",
+    configUrl: "https://www.ol.fr/app-config.json",
+    articleBaseUrl: "https://www.ol.fr/fr/actualites/",
+    locale: "fr",
+    pageSize: 25
   },
   olympique_et_lyonnais: {
     id: "olympique_et_lyonnais",
