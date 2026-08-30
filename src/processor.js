@@ -572,6 +572,68 @@ export async function processPhaseA(db, options = {}) {
   };
 }
 
+
+export async function drainPhaseA(db, options = {}) {
+  const chunkSize = Math.max(1, Math.min(50, Number(options.chunkSize || 25)));
+  const maxDurationMs = Math.max(1000, Number(options.maxDurationMs || 45000));
+  const startedAtMs = Date.now();
+
+  const totals = {
+    chunks: 0,
+    candidates: 0,
+    processed: 0,
+    relevant: 0,
+    rejected: 0,
+    needs_review: 0,
+    extracted: 0,
+    ready: 0,
+    retry: 0,
+    failed: 0
+  };
+  const runs = [];
+  let stopReason = "empty";
+
+  while (true) {
+    if (Date.now() - startedAtMs >= maxDurationMs) {
+      stopReason = "time_guard";
+      break;
+    }
+
+    const run = await processPhaseA(db, { limit: chunkSize });
+    runs.push(run);
+    totals.chunks++;
+    totals.candidates += Number(run.candidates || 0);
+    totals.processed += Number(run.processed || 0);
+    totals.relevant += Number(run.relevant || 0);
+    totals.rejected += Number(run.rejected || 0);
+    totals.needs_review += Number(run.needs_review || 0);
+    totals.extracted += Number(run.extracted || 0);
+    totals.ready += Number(run.ready || 0);
+    totals.retry += Number(run.retry || 0);
+    totals.failed += Number(run.failed || 0);
+
+    if (!run.candidates) {
+      stopReason = "empty";
+      break;
+    }
+
+    if (run.candidates < chunkSize) {
+      stopReason = "drained";
+      break;
+    }
+  }
+
+  return {
+    started_at: new Date(startedAtMs).toISOString(),
+    finished_at: new Date().toISOString(),
+    chunk_size: chunkSize,
+    max_duration_ms: maxDurationMs,
+    stop_reason: stopReason,
+    ...totals,
+    runs
+  };
+}
+
 export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8, filters = {}) {
   const decisionFilter = filters.decision || null;
   const extractionStatusFilter = filters.extractionStatus || null;
