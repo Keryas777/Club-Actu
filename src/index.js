@@ -1,4 +1,5 @@
 import { collectAll, repairMojibake } from "./collector.js";
+import { getProcessingDiagnostics, processPhaseA } from "./processor.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -97,6 +98,13 @@ async function handleApi(request, env, url) {
     });
   }
 
+  if (url.pathname === "/api/processing-status" && request.method === "GET") {
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
+    const limit = parseLimit(url, 8, 20);
+    const diagnostics = await getProcessingDiagnostics(env.DB, club, limit);
+    return json({ ok: true, ...diagnostics });
+  }
+
   if (url.pathname === "/api/sources" && request.method === "GET") {
     const { results } = await env.DB.prepare(
       `SELECT s.*, cs.relation_type, cs.priority
@@ -186,6 +194,9 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(collectAll(env.DB));
+    ctx.waitUntil((async () => {
+      await collectAll(env.DB);
+      await processPhaseA(env.DB, { limit: 25 });
+    })());
   }
 };
