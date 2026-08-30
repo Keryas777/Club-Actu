@@ -20,6 +20,43 @@ function parseLimit(url, fallback = 25, max = 100) {
 async function handleApi(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
 
+
+  if (url.pathname === "/api/debug/ol-source" && request.method === "GET") {
+    const target = "https://www.ol.fr/fr/actualites";
+    try {
+      const res = await fetch(target, {
+        redirect: "follow",
+        headers: {
+          "User-Agent": "ClubActuBot/0.1 (+https://github.com/Keryas777/Club-Actu)",
+          "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
+        }
+      });
+      const text = await res.text();
+      const matches = text.match(/\\?\/fr\\?\/actualites\\?\/[a-z0-9][a-z0-9-]{5,}/gi) || [];
+      const uniqueMatches = [...new Set(matches.map((m) => m.replace(/\\/g, "")))];
+
+      return json({
+        ok: true,
+        target,
+        final_url: res.url,
+        status: res.status,
+        content_type: res.headers.get("content-type"),
+        content_length_header: res.headers.get("content-length"),
+        body_length: text.length,
+        route_match_count: matches.length,
+        unique_route_count: uniqueMatches.length,
+        sample_routes: uniqueMatches.slice(0, 20),
+        body_prefix: text.slice(0, 1200)
+      });
+    } catch (error) {
+      return json({
+        ok: false,
+        target,
+        error: String(error?.message || error)
+      }, { status: 500 });
+    }
+  }
+
   if (url.pathname === "/api/debug/encoding" && request.method === "GET") {
     const samples = [
       "entraÃ®neur",
