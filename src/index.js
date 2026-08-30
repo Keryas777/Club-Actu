@@ -134,6 +134,35 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        config_probe_results: await Promise.all(
+          [
+            "/assets/config/config.json",
+            "/assets/config/config.prod.json",
+            "/assets/config/config.production.json",
+            "/assets/config/app-config.json",
+            "/assets/config.json",
+            "/config.json",
+            "/app-config.json",
+            "/assets/environment.json",
+            "/environment.json"
+          ].map(async (path) => {
+            const endpoint = "https://www.ol.fr" + path;
+            try {
+              const rr = await fetch(endpoint, { redirect: "follow", headers: { accept: "application/json,text/plain,*/*" } });
+              const bb = await rr.text();
+              return {
+                endpoint,
+                status: rr.status,
+                content_type: rr.headers.get("content-type") || "",
+                length: bb.length,
+                is_spa_html: /<!doctype html/i.test(bb),
+                prefix: bb.slice(0, 1200)
+              };
+            } catch (error) {
+              return { endpoint, error: String(error?.message || error) };
+            }
+          })
+        ),
         files,
         candidate_strings: [...allCandidates].slice(0, 200)
       });
