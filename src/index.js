@@ -1,5 +1,5 @@
 import { collectAll, repairMojibake } from "./collector.js";
-import { getProcessingDiagnostics, processPhaseA } from "./processor.js";
+import { drainPhaseA, getProcessingDiagnostics } from "./processor.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -114,7 +114,7 @@ async function handleApi(request, env, url) {
       return json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const result = await processPhaseA(env.DB, { limit: 25 });
+    const result = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
     return json({ ok: true, trigger: "manual", ...result });
   }
 
@@ -229,7 +229,7 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil((async () => {
       await collectAll(env.DB);
-      await processPhaseA(env.DB, { limit: 25 });
+      await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
     })());
   }
 };
