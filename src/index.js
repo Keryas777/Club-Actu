@@ -134,6 +134,58 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        ol_article_query_probe: await (async () => {
+          try {
+            const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
+            const cfg = await cfgRes.json();
+            const apiUrl = String(cfg?.apiUrl || "").replace(/\/+$/, "");
+            const headers = { ...(cfg?.headers || {}), accept: "application/json,text/plain,*/*" };
+            const variants = [
+              { name: "strapi_publish_date_desc", qs: "?sort=publish_date:desc&pagination[pageSize]=10&locale=fr" },
+              { name: "strapi_publishedAt_desc", qs: "?sort=publishedAt:desc&pagination[pageSize]=10&locale=fr" },
+              { name: "strapi_createdAt_desc", qs: "?sort=createdAt:desc&pagination[pageSize]=10&locale=fr" },
+              { name: "limit_sort_publish_date", qs: "?sort=publish_date:desc&limit=10&locale=fr" },
+              { name: "plain_page_1", qs: "?pagination[page]=1&pagination[pageSize]=10&locale=fr" }
+            ];
+            const results = [];
+            for (const v of variants) {
+              const endpoint = apiUrl + "/articles" + v.qs;
+              try {
+                const rr = await fetch(endpoint, { redirect: "follow", headers });
+                const textBody = await rr.text();
+                let parsed = null;
+                try { parsed = JSON.parse(textBody); } catch {}
+                const rows = Array.isArray(parsed?.data) ? parsed.data : Array.isArray(parsed) ? parsed : [];
+                results.push({
+                  name: v.name,
+                  endpoint,
+                  status: rr.status,
+                  count: rows.length,
+                  first: rows[0] ? {
+                    id: rows[0].id ?? null,
+                    title: rows[0].title ?? null,
+                    slug: rows[0].slug ?? null,
+                    publish_date: rows[0].publish_date ?? null,
+                    publishedAt: rows[0].publishedAt ?? null,
+                    createdAt: rows[0].createdAt ?? null
+                  } : null,
+                  last: rows.length ? {
+                    id: rows[rows.length - 1].id ?? null,
+                    title: rows[rows.length - 1].title ?? null,
+                    publish_date: rows[rows.length - 1].publish_date ?? null,
+                    publishedAt: rows[rows.length - 1].publishedAt ?? null
+                  } : null,
+                  meta: parsed?.meta ?? null
+                });
+              } catch (error) {
+                results.push({ name: v.name, endpoint, error: String(error?.message || error) });
+              }
+            }
+            return { ok: true, api_url: apiUrl, results };
+          } catch (error) {
+            return { ok: false, error: String(error?.message || error) };
+          }
+        })(),
         ol_article_api_probe: await (async () => {
           try {
             const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
