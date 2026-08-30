@@ -38,7 +38,7 @@ async function handleApi(request, env, url) {
         const candidates = rawSrcs.map(raw => ({
           raw,
           document_relative: new URL(raw, res.url).toString(),
-          origin_relative: new URL(raw.replace(/^\\.?\\//, "/"), origin).toString()
+          origin_relative: new URL(raw.replace(/^\.?\//, "/"), origin).toString()
         }));
         const fetched = [];
         for (const x of candidates) {
@@ -51,7 +51,7 @@ async function handleApi(request, env, url) {
                 raw:x.raw, requested:scriptUrl, final_url:r.url, status:r.status,
                 content_type:r.headers.get("content-type"), length:body.length,
                 prefix:body.slice(0,120),
-                looks_js:/javascript|ecmascript/i.test(r.headers.get("content-type")||"") || !/^\\s*<!doctype html/i.test(body),
+                looks_js:/javascript|ecmascript/i.test(r.headers.get("content-type")||"") || !/^\s*<!doctype html/i.test(body),
                 contains_api:/api/i.test(body),
                 contains_actualites:/actualit/i.test(body)
               });
