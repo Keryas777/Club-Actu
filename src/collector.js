@@ -142,6 +142,34 @@ function looksLikeArticleTitle(title = "") {
   return true;
 }
 
+async function discoverOlApi(adapter) {
+  const configRes = await fetch(adapter.configUrl, {
+    redirect: "follow",
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json,text/plain,*/*" }
+  });
+  if (!configRes.ok) throw new Error(`OL config HTTP ${configRes.status}`);
+  const config = await configRes.json();
+  const apiUrl = String((config && config.apiUrl) || "").replace(/\/+$/, "");
+  if (!apiUrl) throw new Error("OL config missing apiUrl");
+  const headers = Object.assign({}, (config && config.headers) || {}, {
+    "User-Agent": USER_AGENT,
+    Accept: "application/json,text/plain,*/*"
+  });
+  const pageSize = Math.max(1, Math.min(100, Number(adapter.pageSize || 25)));
+  const locale = encodeURIComponent(adapter.locale || "fr");
+  const endpoint = `${apiUrl}/articles?sort=publish_date:desc&pagination[pageSize]=${pageSize}&locale=${locale}`;
+  const res = await fetch(endpoint, { redirect: "follow", headers });
+  if (!res.ok) throw new Error(`OL articles HTTP ${res.status}`);
+  const payload = await res.json();
+  const rows = Array.isArray(payload && payload.data) ? payload.data : [];
+  return rows.filter((row) => row && row.slug && row.title).map((row) => ({
+    url: canonicalize(new URL(String(row.slug), adapter.articleBaseUrl).toString()),
+    title: repairMojibake(row.title || ""),
+    excerpt: repairMojibake(row.description || ""),
+    publishedAt: row.publish_date || row.publishedAt || null,
+    discoveryMethod: "api"
+  }));
+}
 function discoverLinks(html, adapter) {
   const found = new Map();
 
@@ -191,8 +219,11 @@ function discoverLinks(html, adapter) {
 
 async function upsertArticle(db, sourceId, item, now) {
   const normalizedTitle = repairMojibake(item.title || "");
+  const normalizedExcerpt = repairMojibake(item.excerpt || "");
+  const publishedAt = item.publishedAt || null;
+  const discoveryMethod = item.discoveryMethod || "html_links";
   const id = await sha256Hex(sourceId + "|" + item.url);
-  const contentHash = await sha256Hex(normalizedTitle || item.url);
+  const contentHash = await sha256Hex([normalizedTitle, normalizedExcerpt, publishedAt || ""].join("|") || item.url);
 
   const existing = await db.prepare(
     "SELECT id, content_hash FROM raw_articles WHERE source_id = ? AND canonical_url = ?"
@@ -245,9 +276,14 @@ export async function collectAll(db) {
 
   for (const adapter of adapters) {
     try {
-      const page = await fetchText(adapter.discoveryUrl);
-      if (!page.ok) throw new Error(`HTTP ${page.status}`);
-      const links = discoverLinks(page.text, adapter);
+      let links;
+      if (adapter.discoveryMode === "ol_api") {
+        links = await discoverOlApi(adapter);
+      } else {
+        const page = await fetchText(adapter.discoveryUrl);
+        if (!page.ok) throw new Error(`HTTP ${page.status}`);
+        links = discoverLinks(page.text, adapter);
+      }
       discovered += links.length;
       let sourceInserted = 0, sourceUpdated = 0;
       for (const item of links) {
