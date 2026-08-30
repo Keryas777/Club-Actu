@@ -22,33 +22,46 @@ async function handleApi(request, env, url) {
 
 
   if (url.pathname === "/api/debug/ol-source" && request.method === "GET") {
-    const target = "https://www.ol.fr/fr/actualites";
-    try {
-      const res = await fetch(target, { redirect: "follow" });
-      const html = await res.text();
-      const srcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)]
-        .map(m => new URL(m[1], res.url).toString());
-      const scripts = [];
-      for (const src of [...new Set(srcs)]) {
-        try {
-          const r = await fetch(src, { redirect: "follow" });
-          const body = await r.text();
-          scripts.push({
-            src, final_url:r.url, status:r.status,
-            content_type:r.headers.get("content-type"),
-            length:body.length,
-            prefix:body.slice(0,300),
-            contains_api:/api/i.test(body),
-            contains_article:/article|actualit/i.test(body)
-          });
-        } catch(e) {
-          scripts.push({src,error:String(e?.message||e)});
+    const targets = [
+      "https://www.ol.fr/fr/actualites",
+      "https://www.ol.fr/actualites",
+      "https://www.ol.fr/"
+    ];
+    const probes = [];
+    for (const target of targets) {
+      try {
+        const res = await fetch(target, { redirect: "follow" });
+        const html = await res.text();
+        const baseHref = html.match(/<base\\s+href=["']([^"']+)["']/i)?.[1] || "/";
+        const rawSrcs = [...html.matchAll(/<script\\b[^>]*src=["']([^"']+)["']/gi)].map(m => m[1]);
+        const origin = new URL(res.url).origin;
+        const candidates = rawSrcs.map(raw => ({
+          raw,
+          document_relative: new URL(raw, res.url).toString(),
+          origin_relative: new URL(raw.replace(/^\\.?\\//, "/"), origin).toString()
+        }));
+        const fetched = [];
+        for (const x of candidates) {
+          const urls = [...new Set([x.document_relative, x.origin_relative])];
+          for (const scriptUrl of urls) {
+            try {
+              const r = await fetch(scriptUrl, { redirect: "follow" });
+              const body = await r.text();
+              fetched.push({
+                raw:x.raw, requested:scriptUrl, final_url:r.url, status:r.status,
+                content_type:r.headers.get("content-type"), length:body.length,
+                prefix:body.slice(0,120),
+                looks_js:/javascript|ecmascript/i.test(r.headers.get("content-type")||"") || !/^\\s*<!doctype html/i.test(body),
+                contains_api:/api/i.test(body),
+                contains_actualites:/actualit/i.test(body)
+              });
+            } catch(e) { fetched.push({raw:x.raw,requested:scriptUrl,error:String(e?.message||e)}); }
+          }
         }
-      }
-      return json({ok:true,target,status:res.status,body_length:html.length,scripts});
-    } catch(e) {
-      return json({ok:false,target,error:String(e?.message||e)},{status:500});
+        probes.push({target,final_url:res.url,status:res.status,base_href:baseHref,raw_script_srcs:rawSrcs,fetched});
+      } catch(e) { probes.push({target,error:String(e?.message||e)}); }
     }
+    return json({ok:true,probes});
   }
 
   if (url.pathname === "/api/debug/encoding" && request.method === "GET") {
