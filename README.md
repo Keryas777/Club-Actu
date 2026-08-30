@@ -12,6 +12,7 @@ Backend commun du futur réseau de sites d'actualité football par club.
 - collecte brute de métadonnées sans IA
 - cron toutes les 30 minutes
 - endpoints de diagnostic
+- Phase A déterministe : extraction/normalisation, pertinence par club, rejets explicites, retry et préparation au regroupement
 
 ## Endpoints
 
@@ -19,6 +20,7 @@ Backend commun du futur réseau de sites d'actualité football par club.
 - `GET /api/sources`
 - `GET /api/articles?limit=25`
 - `GET /api/collection-runs?limit=10`
+- `GET /api/processing-status?club=ol&limit=8`
 
 ## Pipeline cible
 
@@ -28,6 +30,6 @@ L'Olympique Lyonnais est le premier club utilisé pour valider le pipeline.
 
 ## Important
 
-La collecte actuelle ne fait encore qu'une découverte de liens et de titres sur les sources explicitement activées. Elle ne réalise ni extraction intégrale d'articles, ni filtrage OL final, ni synthèse IA.
+La collecte reste séparée du traitement. La Phase A traite ensuite les lignes `raw_articles` de façon déterministe : elle réutilise les métadonnées structurées lorsqu'elles suffisent, extrait la page lorsque nécessaire, évalue la pertinence par club et conserve les décisions/rejets. Aucun regroupement sémantique ni aucune synthèse IA n'est encore réalisé.
 
 <!-- Cloudflare deployment trigger: Git connection restored -->
