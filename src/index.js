@@ -22,46 +22,76 @@ async function handleApi(request, env, url) {
 
 
   if (url.pathname === "/api/debug/ol-source" && request.method === "GET") {
-    const targets = [
-      "https://www.ol.fr/fr/actualites",
-      "https://www.ol.fr/actualites",
-      "https://www.ol.fr/"
-    ];
-    const probes = [];
-    for (const target of targets) {
-      try {
-        const res = await fetch(target, { redirect: "follow" });
-        const html = await res.text();
-        const baseHref = html.match(/<base\s+href=["']([^"']+)["']/i)?.[1] || "/";
-        const rawSrcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)].map(m => m[1]);
-        const origin = new URL(res.url).origin;
-        const candidates = rawSrcs.map(raw => ({
-          raw,
-          document_relative: new URL(raw, res.url).toString(),
-          origin_relative: new URL(raw.replace(/^\.?\//, "/"), origin).toString()
-        }));
-        const fetched = [];
-        for (const x of candidates) {
-          const urls = [...new Set([x.document_relative, x.origin_relative])];
-          for (const scriptUrl of urls) {
-            try {
-              const r = await fetch(scriptUrl, { redirect: "follow" });
-              const body = await r.text();
-              fetched.push({
-                raw:x.raw, requested:scriptUrl, final_url:r.url, status:r.status,
-                content_type:r.headers.get("content-type"), length:body.length,
-                prefix:body.slice(0,120),
-                looks_js:/javascript|ecmascript/i.test(r.headers.get("content-type")||"") || !/^\s*<!doctype html/i.test(body),
-                contains_api:/api/i.test(body),
-                contains_actualites:/actualit/i.test(body)
-              });
-            } catch(e) { fetched.push({raw:x.raw,requested:scriptUrl,error:String(e?.message||e)}); }
+    const target = "https://www.ol.fr/fr/actualites";
+    try {
+      const res = await fetch(target, { redirect: "follow" });
+      const html = await res.text();
+      const origin = new URL(res.url).origin;
+
+      const rawSrcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)].map((m) => m[1]);
+      const rootScripts = [...new Set(rawSrcs.map((raw) => new URL("/" + raw.replace(/^\/+/, ""), origin).toString()))];
+
+      const files = [];
+      const allCandidates = new Set();
+      const seen = new Set();
+      const queue = [...rootScripts];
+
+      while (queue.length && seen.size < 20) {
+        const scriptUrl = queue.shift();
+        if (!scriptUrl || seen.has(scriptUrl)) continue;
+        seen.add(scriptUrl);
+
+        try {
+          const r = await fetch(scriptUrl, { redirect: "follow" });
+          const body = await r.text();
+          const contentType = r.headers.get("content-type") || "";
+          const looksJs = /javascript|ecmascript/i.test(contentType) || !/^\s*<!doctype html/i.test(body);
+
+          const candidateStrings = [];
+          const quoted = body.match(/["'`](.{1,240}?)["'`]/g) || [];
+          for (const token of quoted) {
+            const value = token.slice(1, -1);
+            if (/api|graphql|actualit|article|news|content|cms|backend/i.test(value)) {
+              candidateStrings.push(value);
+              allCandidates.add(value);
+            }
           }
+
+          const imports = [];
+          const importRe = /(?:from\s*|import\s*)["']\.\/([^"']+\.js)["']/g;
+          let im;
+          while ((im = importRe.exec(body))) {
+            const chunkUrl = new URL("/" + im[1].replace(/^\/+/, ""), origin).toString();
+            imports.push(chunkUrl);
+            if (!seen.has(chunkUrl)) queue.push(chunkUrl);
+          }
+
+          files.push({
+            url: scriptUrl,
+            status: r.status,
+            content_type: contentType,
+            length: body.length,
+            looks_js: looksJs,
+            imports: [...new Set(imports)].slice(0, 20),
+            candidate_strings: [...new Set(candidateStrings)].slice(0, 80)
+          });
+        } catch (error) {
+          files.push({ url: scriptUrl, error: String(error?.message || error) });
         }
-        probes.push({target,final_url:res.url,status:res.status,base_href:baseHref,raw_script_srcs:rawSrcs,fetched});
-      } catch(e) { probes.push({target,error:String(e?.message||e)}); }
+      }
+
+      return json({
+        ok: true,
+        target,
+        status: res.status,
+        root_scripts: rootScripts,
+        scanned_file_count: files.length,
+        files,
+        candidate_strings: [...allCandidates].slice(0, 200)
+      });
+    } catch (error) {
+      return json({ ok: false, target, error: String(error?.message || error) }, { status: 500 });
     }
-    return json({ok:true,probes});
   }
 
   if (url.pathname === "/api/debug/encoding" && request.method === "GET") {
