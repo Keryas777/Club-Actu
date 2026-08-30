@@ -109,14 +109,36 @@ async function handleApi(request, env, url) {
 
   if (url.pathname === "/api/articles" && request.method === "GET") {
     const limit = parseLimit(url);
-    const { results } = await env.DB.prepare(
-      `SELECT id, source_id, canonical_url AS url, title, published_at,
-              content_level, first_seen_at, last_seen_at, processing_status
-       FROM raw_articles
-       ORDER BY last_seen_at DESC
-       LIMIT ?`
-    ).bind(limit).all();
-    return json({ ok: true, count: results.length, articles: results });
+    const source = (url.searchParams.get("source") || "").trim();
+
+    let statement;
+    let bindings;
+
+    if (source) {
+      statement = env.DB.prepare(
+        `SELECT id, source_id, canonical_url AS url, title, published_at,
+                excerpt, content_level, discovery_method,
+                first_seen_at, last_seen_at, processing_status
+         FROM raw_articles
+         WHERE source_id = ?
+         ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC
+         LIMIT ?`
+      );
+      bindings = [source, limit];
+    } else {
+      statement = env.DB.prepare(
+        `SELECT id, source_id, canonical_url AS url, title, published_at,
+                excerpt, content_level, discovery_method,
+                first_seen_at, last_seen_at, processing_status
+         FROM raw_articles
+         ORDER BY last_seen_at DESC
+         LIMIT ?`
+      );
+      bindings = [limit];
+    }
+
+    const { results } = await statement.bind(...bindings).all();
+    return json({ ok: true, source: source || null, count: results.length, articles: results });
   }
 
   if (url.pathname === "/api/collection-runs" && request.method === "GET") {
