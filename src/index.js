@@ -105,6 +105,35 @@ async function handleApi(request, env, url) {
         root_scripts: rootScripts,
         scanned_file_count: files.length,
         api_url_candidates: [...apiUrlCandidates].slice(0, 100),
+        api_probe_results: await Promise.all(
+          [...apiUrlCandidates]
+            .filter((base) => /^https:\/\//i.test(base) && !/media\.|auth\./i.test(base))
+            .slice(0, 20)
+            .map(async (base) => {
+              const normalized = base.replace(/\/+$/, "");
+              const endpoints = [normalized + "/articles", normalized + "/articles/count"];
+              const results = [];
+              for (const endpoint of endpoints) {
+                try {
+                  const rr = await fetch(endpoint, {
+                    redirect: "follow",
+                    headers: { accept: "application/json,text/plain,*/*" }
+                  });
+                  const bb = await rr.text();
+                  results.push({
+                    endpoint,
+                    status: rr.status,
+                    content_type: rr.headers.get("content-type") || "",
+                    length: bb.length,
+                    prefix: bb.slice(0, 500)
+                  });
+                } catch (error) {
+                  results.push({ endpoint, error: String(error?.message || error) });
+                }
+              }
+              return { base: normalized, results };
+            })
+        ),
         files,
         candidate_strings: [...allCandidates].slice(0, 200)
       });
