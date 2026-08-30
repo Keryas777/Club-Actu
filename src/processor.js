@@ -550,7 +550,9 @@ export async function processPhaseA(db, options = {}) {
   };
 }
 
-export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8) {
+export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8, filters = {}) {
+  const decisionFilter = filters.decision || null;
+  const extractionStatusFilter = filters.extractionStatus || null;
   const waiting = await db.prepare(
     `SELECT COUNT(*) AS n
      FROM raw_articles r
@@ -632,17 +634,52 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
      LIMIT 20`
   ).bind(clubId, RULE_VERSION).all();
 
-  const { results: examples } = await db.prepare(
-    `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
-            a.decision, a.reason_code, a.decided_at
-     FROM article_club_assessments a
-     JOIN raw_articles r ON r.id = a.article_id
-     WHERE a.club_id = ?
-       AND a.source_content_hash = r.content_hash
-       AND a.rule_version = ?
-     ORDER BY a.decided_at DESC
-     LIMIT ?`
-  ).bind(clubId, RULE_VERSION, exampleLimit).all();
+  let examples;
+  if (extractionStatusFilter) {
+    let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+                      a.decision, a.reason_code,
+                      e.status AS extraction_status,
+                      e.error_code, e.error_detail, e.retry_after, e.updated_at
+               FROM raw_articles r
+               JOIN article_extractions e
+                 ON e.article_id = r.id
+                AND e.source_content_hash = r.content_hash
+                AND e.extractor_version = ?
+               LEFT JOIN article_club_assessments a
+                 ON a.article_id = r.id
+                AND a.club_id = ?
+                AND a.source_content_hash = r.content_hash
+                AND a.rule_version = ?
+               WHERE e.status = ?`;
+    const bindings = [EXTRACTOR_VERSION, clubId, RULE_VERSION, extractionStatusFilter];
+
+    if (decisionFilter) {
+      sql += " AND a.decision = ?";
+      bindings.push(decisionFilter);
+    }
+
+    sql += " ORDER BY e.updated_at DESC LIMIT ?";
+    bindings.push(exampleLimit);
+    ({ results: examples } = await db.prepare(sql).bind(...bindings).all());
+  } else {
+    let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+                      a.decision, a.reason_code, a.decided_at
+               FROM article_club_assessments a
+               JOIN raw_articles r ON r.id = a.article_id
+               WHERE a.club_id = ?
+                 AND a.source_content_hash = r.content_hash
+                 AND a.rule_version = ?`;
+    const bindings = [clubId, RULE_VERSION];
+
+    if (decisionFilter) {
+      sql += " AND a.decision = ?";
+      bindings.push(decisionFilter);
+    }
+
+    sql += " ORDER BY a.decided_at DESC LIMIT ?";
+    bindings.push(exampleLimit);
+    ({ results: examples } = await db.prepare(sql).bind(...bindings).all());
+  }
 
   const latestRun = await db.prepare(
     `SELECT id, started_at, finished_at, status, candidates, processed,
@@ -655,6 +692,10 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
   return {
     club_id: clubId,
     versions: { extractor: EXTRACTOR_VERSION, relevance_rules: RULE_VERSION },
+    filters: {
+      decision: decisionFilter,
+      extraction_status: extractionStatusFilter
+    },
     waiting: Number(waiting?.n || 0),
     relevant: Number(counts?.relevant || 0),
     rejected: Number(counts?.rejected || 0),
