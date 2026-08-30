@@ -269,6 +269,25 @@ async function upsertArticle(db, sourceId, item, now) {
 }
 
 export async function collectAll(db) {
+  const staleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const recoveredAt = new Date().toISOString();
+
+  await db.prepare(
+    `UPDATE collection_runs
+     SET status = 'abandoned',
+         finished_at = COALESCE(finished_at, ?),
+         notes = CASE
+           WHEN notes IS NULL OR notes = '' THEN ?
+           ELSE notes
+         END
+     WHERE status = 'running'
+       AND started_at < ?`
+  ).bind(
+    recoveredAt,
+    JSON.stringify({ reason: "stale_run_recovered", recovered_at: recoveredAt }),
+    staleBefore
+  ).run();
+
   const runId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   const adapters = listEnabledAdapters();
