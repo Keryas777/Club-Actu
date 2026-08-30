@@ -70,7 +70,8 @@ export function classifyTechnicalArticle(article, extraction) {
 
   if (
     /\/(?:login|connexion|compte|account|abonnement|newsletter|contact|mentions-legales|privacy|cookies?|classement|calendrier|resultats?|effectif|billetterie|boutique)(?:\/|$)/i.test(url) ||
-    /^(?:se connecter|connexion|accueil|calendrier|classement|résultats?|effectif|billetterie|boutique|newsletter|contact)(?:\b|\s|\/|-)/i.test(title)
+    /%7burl_(?:tunnel|logout)%7d/i.test(url) ||
+    /^(?:se connecter|se déconnecter|connexion|accueil|calendrier|classement|résultats?|effectif|billetterie|boutique|newsletter|contact|refuser\s*&\s*s'abonner)(?:\b|\s|\/|-)/i.test(title)
   ) {
     return { status: "rejected", reason_code: "navigation_page" };
   }
@@ -388,6 +389,27 @@ function coarseStatus(summary) {
 
 export async function processPhaseA(db, options = {}) {
   const limit = Math.max(1, Math.min(50, Number(options.limit || 25)));
+
+  // A Worker can be interrupted before it reaches the final UPDATE. Keep
+  // observability honest: a run still marked running after one hour is stale.
+  const staleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const recoveredAt = new Date().toISOString();
+  await db.prepare(
+    `UPDATE processing_runs
+     SET status = 'abandoned',
+         finished_at = COALESCE(finished_at, ?),
+         notes = CASE
+           WHEN notes IS NULL OR notes = '' THEN ?
+           ELSE notes
+         END
+     WHERE status = 'running'
+       AND started_at < ?`
+  ).bind(
+    recoveredAt,
+    JSON.stringify({ reason: "stale_run_recovered", recovered_at: recoveredAt }),
+    staleBefore
+  ).run();
+
   const runId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   const candidates = await loadCandidates(db, limit);

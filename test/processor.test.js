@@ -110,3 +110,38 @@ test("title-only metadata requests content extraction", () => {
     { status: "needs_content", reason_code: "insufficient_content" }
   );
 });
+
+
+test("Le Progres subscription tunnel artifacts are navigation pages", () => {
+  assert.deepEqual(
+    classifyTechnicalArticle(
+      {
+        canonical_url: "https://www.leprogres.fr/sport/%7Burl_tunnel%7D",
+        title: "REFUSER & S'ABONNER"
+      },
+      {
+        normalized_title: "REFUSER & S'ABONNER",
+        normalized_excerpt: "",
+        normalized_content: ""
+      }
+    ),
+    { status: "rejected", reason_code: "navigation_page" }
+  );
+});
+
+test("Le Progres logout artifacts are navigation pages", () => {
+  assert.deepEqual(
+    classifyTechnicalArticle(
+      {
+        canonical_url: "https://www.leprogres.fr/sport/%7Burl_logout%7D",
+        title: "Se déconnecter"
+      },
+      {
+        normalized_title: "Se déconnecter",
+        normalized_excerpt: "",
+        normalized_content: ""
+      }
+    ),
+    { status: "rejected", reason_code: "navigation_page" }
+  );
+});
