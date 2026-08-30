@@ -24,84 +24,30 @@ async function handleApi(request, env, url) {
   if (url.pathname === "/api/debug/ol-source" && request.method === "GET") {
     const target = "https://www.ol.fr/fr/actualites";
     try {
-      const res = await fetch(target, {
-        redirect: "follow",
-        headers: {
-          "User-Agent": "ClubActuBot/0.1 (+https://github.com/Keryas777/Club-Actu)",
-          "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
-        }
-      });
+      const res = await fetch(target, { redirect: "follow" });
       const html = await res.text();
-
-      const routeMatches = html.match(/\\?\/fr\\?\/actualites\\?\/[a-z0-9][a-z0-9-]{5,}/gi) || [];
-      const uniqueRoutes = [...new Set(routeMatches.map((m) => m.replace(/\\/g, "")))];
-
-      const scriptSrcs = [];
-      const scriptRe = /<script\b[^>]*src=["']([^"']+)["'][^>]*>/gi;
-      let sm;
-      while ((sm = scriptRe.exec(html))) {
+      const srcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)]
+        .map(m => new URL(m[1], res.url).toString());
+      const scripts = [];
+      for (const src of [...new Set(srcs)]) {
         try {
-          scriptSrcs.push(new URL(sm[1], res.url).toString());
-        } catch {}
-      }
-
-      const scannedScripts = [];
-      const candidates = [];
-      const urlLikeRe = /https?:\\?\/\\?\/[^"'\s)]+|\\?\/(?:api|graphql|content|news|actualites|articles)[^"'\s)]*/gi;
-
-      for (const src of [...new Set(scriptSrcs)].slice(0, 12)) {
-        try {
-          const jsRes = await fetch(src, {
-            headers: {
-              "User-Agent": "ClubActuBot/0.1 (+https://github.com/Keryas777/Club-Actu)"
-            }
+          const r = await fetch(src, { redirect: "follow" });
+          const body = await r.text();
+          scripts.push({
+            src, final_url:r.url, status:r.status,
+            content_type:r.headers.get("content-type"),
+            length:body.length,
+            prefix:body.slice(0,300),
+            contains_api:/api/i.test(body),
+            contains_article:/article|actualit/i.test(body)
           });
-          const js = await jsRes.text();
-          const hits = js.match(urlLikeRe) || [];
-          const relevant = [...new Set(
-            hits
-              .map((x) => x.replace(/\\/g, ""))
-              .filter((x) => /api|graphql|actualit|article|news|content/i.test(x))
-          )].slice(0, 50);
-
-          if (/actualit|article|graphql|api/i.test(js)) {
-            scannedScripts.push({
-              src,
-              status: jsRes.status,
-              length: js.length,
-              relevant_hits: relevant
-            });
-            candidates.push(...relevant);
-          }
-        } catch (error) {
-          scannedScripts.push({
-            src,
-            error: String(error?.message || error)
-          });
+        } catch(e) {
+          scripts.push({src,error:String(e?.message||e)});
         }
       }
-
-      return json({
-        ok: true,
-        target,
-        final_url: res.url,
-        status: res.status,
-        content_type: res.headers.get("content-type"),
-        body_length: html.length,
-        route_match_count: routeMatches.length,
-        unique_route_count: uniqueRoutes.length,
-        sample_routes: uniqueRoutes.slice(0, 20),
-        script_count: scriptSrcs.length,
-        scripts: [...new Set(scriptSrcs)],
-        scanned_scripts: scannedScripts,
-        candidate_endpoints: [...new Set(candidates)].slice(0, 100)
-      });
-    } catch (error) {
-      return json({
-        ok: false,
-        target,
-        error: String(error?.message || error)
-      }, { status: 500 });
+      return json({ok:true,target,status:res.status,body_length:html.length,scripts});
+    } catch(e) {
+      return json({ok:false,target,error:String(e?.message||e)},{status:500});
     }
   }
 
