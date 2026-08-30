@@ -22,328 +22,76 @@ async function handleApi(request, env, url) {
 
 
   if (url.pathname === "/api/debug/ol-source" && request.method === "GET") {
-    const target = "https://www.ol.fr/fr/actualites";
     try {
-      const res = await fetch(target, { redirect: "follow" });
-      const html = await res.text();
-      const origin = new URL(res.url).origin;
+      const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
+      const cfg = await cfgRes.json();
 
-      const rawSrcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)].map((m) => m[1]);
-      const rootScripts = [...new Set(rawSrcs.map((raw) => new URL("/" + raw.replace(/^\/+/, ""), origin).toString()))];
+      const apiUrl = String(cfg?.apiUrl || "").replace(/\/+$/, "");
+      const headers = {
+        ...(cfg?.headers || {}),
+        accept: "application/json,text/plain,*/*"
+      };
 
-      const files = [];
-      const allCandidates = new Set();
-      const seen = new Set();
-      const queue = [...rootScripts];
+      const variants = [
+        { name: "publish_date_desc", qs: "?sort=publish_date:desc&pagination[pageSize]=10&locale=fr" },
+        { name: "publishedAt_desc", qs: "?sort=publishedAt:desc&pagination[pageSize]=10&locale=fr" },
+        { name: "createdAt_desc", qs: "?sort=createdAt:desc&pagination[pageSize]=10&locale=fr" },
+        { name: "limit_publish_date", qs: "?sort=publish_date:desc&limit=10&locale=fr" },
+        { name: "page_1", qs: "?pagination[page]=1&pagination[pageSize]=10&locale=fr" }
+      ];
 
-      while (queue.length && seen.size < 20) {
-        const scriptUrl = queue.shift();
-        if (!scriptUrl || seen.has(scriptUrl)) continue;
-        seen.add(scriptUrl);
-
+      const results = [];
+      for (const v of variants) {
+        const endpoint = apiUrl + "/articles" + v.qs;
         try {
-          const r = await fetch(scriptUrl, { redirect: "follow" });
-          const body = await r.text();
-          const contentType = r.headers.get("content-type") || "";
-          const looksJs = /javascript|ecmascript/i.test(contentType) || !/^\s*<!doctype html/i.test(body);
+          const rr = await fetch(endpoint, { redirect: "follow", headers });
+          const textBody = await rr.text();
 
-          const candidateStrings = [];
-          const quoted = body.match(/["'`](.{1,240}?)["'`]/g) || [];
-          for (const token of quoted) {
-            const value = token.slice(1, -1);
-            if (/api|graphql|actualit|article|news|content|cms|backend/i.test(value)) {
-              candidateStrings.push(value);
-              allCandidates.add(value);
-            }
-          }
+          let parsed = null;
+          try { parsed = JSON.parse(textBody); } catch {}
 
-          const imports = [];
-          const importRe = /(?:from\s*|import\s*)["']\.\/([^"']+\.js)["']/g;
-          let im;
-          while ((im = importRe.exec(body))) {
-            const chunkUrl = new URL("/" + im[1].replace(/^\/+/, ""), origin).toString();
-            imports.push(chunkUrl);
-            if (!seen.has(chunkUrl)) queue.push(chunkUrl);
-          }
+          const rows = Array.isArray(parsed?.data)
+            ? parsed.data
+            : Array.isArray(parsed)
+              ? parsed
+              : [];
 
-          files.push({
-            url: scriptUrl,
-            status: r.status,
-            content_type: contentType,
-            length: body.length,
-            looks_js: looksJs,
-            imports: [...new Set(imports)].slice(0, 20),
-            candidate_strings: [...new Set(candidateStrings)].slice(0, 80)
+          const compact = rows.slice(0, 3).map((row) => ({
+            id: row?.id ?? null,
+            title: row?.title ?? null,
+            slug: row?.slug ?? null,
+            publish_date: row?.publish_date ?? null,
+            publishedAt: row?.publishedAt ?? null,
+            createdAt: row?.createdAt ?? null,
+            locale: row?.locale ?? null
+          }));
+
+          results.push({
+            name: v.name,
+            status: rr.status,
+            count: rows.length,
+            first_three: compact,
+            meta: parsed?.meta ?? null
           });
         } catch (error) {
-          files.push({ url: scriptUrl, error: String(error?.message || error) });
+          results.push({
+            name: v.name,
+            error: String(error?.message || error)
+          });
         }
-      }
-
-      // Extract the runtime API base URL from Angular's bundled configuration.
-      // OL's article service builds routes such as `${config.apiUrl}/articles`.
-      const apiUrlCandidates = new Set();
-      for (const file of files) {
-        if (!file.url || !file.looks_js) continue;
-        try {
-          const rr = await fetch(file.url, { redirect: "follow" });
-          const bb = await rr.text();
-          const urlMatches = bb.match(/https?:\\?\/\\?\/[^"'\`\\s,}]{4,240}/g) || [];
-          for (let value of urlMatches) {
-            value = value.replace(/\\\//g, "/");
-            if (/api|ol\.fr|olvallee|lyonnais/i.test(value)) apiUrlCandidates.add(value);
-          }
-          const configSnippets = bb.match(/.{0,180}apiUrl.{0,260}/g) || [];
-          for (const snippet of configSnippets) allCandidates.add(snippet);
-        } catch {}
       }
 
       return json({
         ok: true,
-        target,
-        status: res.status,
-        root_scripts: rootScripts,
-        scanned_file_count: files.length,
-        api_url_candidates: [...apiUrlCandidates].slice(0, 100),
-        api_probe_results: await Promise.all(
-          [...apiUrlCandidates]
-            .filter((base) => /^https:\/\//i.test(base) && !/media\.|auth\./i.test(base))
-            .slice(0, 20)
-            .map(async (base) => {
-              const normalized = base.replace(/\/+$/, "");
-              const endpoints = [normalized + "/articles", normalized + "/articles/count"];
-              const results = [];
-              for (const endpoint of endpoints) {
-                try {
-                  const rr = await fetch(endpoint, {
-                    redirect: "follow",
-                    headers: { accept: "application/json,text/plain,*/*" }
-                  });
-                  const bb = await rr.text();
-                  results.push({
-                    endpoint,
-                    status: rr.status,
-                    content_type: rr.headers.get("content-type") || "",
-                    length: bb.length,
-                    prefix: bb.slice(0, 500)
-                  });
-                } catch (error) {
-                  results.push({ endpoint, error: String(error?.message || error) });
-                }
-              }
-              return { base: normalized, results };
-            })
-        ),
-        ol_article_query_probe: await (async () => {
-          try {
-            const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
-            const cfg = await cfgRes.json();
-            const apiUrl = String(cfg?.apiUrl || "").replace(/\/+$/, "");
-            const headers = { ...(cfg?.headers || {}), accept: "application/json,text/plain,*/*" };
-            const variants = [
-              { name: "strapi_publish_date_desc", qs: "?sort=publish_date:desc&pagination[pageSize]=10&locale=fr" },
-              { name: "strapi_publishedAt_desc", qs: "?sort=publishedAt:desc&pagination[pageSize]=10&locale=fr" },
-              { name: "strapi_createdAt_desc", qs: "?sort=createdAt:desc&pagination[pageSize]=10&locale=fr" },
-              { name: "limit_sort_publish_date", qs: "?sort=publish_date:desc&limit=10&locale=fr" },
-              { name: "plain_page_1", qs: "?pagination[page]=1&pagination[pageSize]=10&locale=fr" }
-            ];
-            const results = [];
-            for (const v of variants) {
-              const endpoint = apiUrl + "/articles" + v.qs;
-              try {
-                const rr = await fetch(endpoint, { redirect: "follow", headers });
-                const textBody = await rr.text();
-                let parsed = null;
-                try { parsed = JSON.parse(textBody); } catch {}
-                const rows = Array.isArray(parsed?.data) ? parsed.data : Array.isArray(parsed) ? parsed : [];
-                results.push({
-                  name: v.name,
-                  endpoint,
-                  status: rr.status,
-                  count: rows.length,
-                  first: rows[0] ? {
-                    id: rows[0].id ?? null,
-                    title: rows[0].title ?? null,
-                    slug: rows[0].slug ?? null,
-                    publish_date: rows[0].publish_date ?? null,
-                    publishedAt: rows[0].publishedAt ?? null,
-                    createdAt: rows[0].createdAt ?? null
-                  } : null,
-                  last: rows.length ? {
-                    id: rows[rows.length - 1].id ?? null,
-                    title: rows[rows.length - 1].title ?? null,
-                    publish_date: rows[rows.length - 1].publish_date ?? null,
-                    publishedAt: rows[rows.length - 1].publishedAt ?? null
-                  } : null,
-                  meta: parsed?.meta ?? null
-                });
-              } catch (error) {
-                results.push({ name: v.name, endpoint, error: String(error?.message || error) });
-              }
-            }
-            return { ok: true, api_url: apiUrl, results };
-          } catch (error) {
-            return { ok: false, error: String(error?.message || error) };
-          }
-        })(),
-        ol_article_api_probe: await (async () => {
-          try {
-            const cfgRes = await fetch("https://www.ol.fr/app-config.json", { redirect: "follow" });
-            const cfg = await cfgRes.json();
-            const apiUrl = String(cfg?.apiUrl || "").replace(/\/+$/, "");
-            const headers = { ...(cfg?.headers || {}), accept: "application/json,text/plain,*/*" };
-            const endpoints = [apiUrl + "/articles", apiUrl + "/articles/count"];
-            const results = [];
-            for (const endpoint of endpoints) {
-              try {
-                const rr = await fetch(endpoint, { redirect: "follow", headers });
-                const bb = await rr.text();
-                results.push({
-                  endpoint,
-                  status: rr.status,
-                  content_type: rr.headers.get("content-type") || "",
-                  length: bb.length,
-                  prefix: bb.slice(0, 1800)
-                });
-              } catch (error) {
-                results.push({ endpoint, error: String(error?.message || error) });
-              }
-            }
-            return {
-              ok: true,
-              api_url: apiUrl,
-              header_names: Object.keys(cfg?.headers || {}),
-              results
-            };
-          } catch (error) {
-            return { ok: false, error: String(error?.message || error) };
-          }
-        })(),
-        ol_app_config_fetch: await (async () => {
-          const urls = [
-            "https://www.ol.fr/app-config.json",
-            "https://www.ol.fr/assets/app-config.json"
-          ];
-          const results = [];
-          for (const url of urls) {
-            try {
-              const rr = await fetch(url, { redirect: "follow" });
-              const body = await rr.text();
-              results.push({
-                url, status: rr.status, content_type: rr.headers.get("content-type"),
-                length: body.length,
-                is_spa_html: /<!doctype html|<html/i.test(body.slice(0,500)),
-                body: body.slice(0, 12000)
-              });
-            } catch (e) { results.push({ url, error: String(e) }); }
-          }
-          return results;
-        })(),
-        app_config_service_summary: await (async () => {
-          const hits = [];
-          const needles = ["readConfig(){", "readConfig() {", "readConfig=", "apiUrl:", ".apiUrl=", "configUrl", "configPath"];
-          for (const file of files) {
-            if (!file.url || !file.looks_js) continue;
-            try {
-              const rr = await fetch(file.url, { redirect: "follow" });
-              const bb = await rr.text();
-              for (const needle of needles) {
-                let from = 0;
-                while (hits.length < 20) {
-                  const idx = bb.indexOf(needle, from);
-                  if (idx < 0) break;
-                  hits.push({ file: file.url.split("/").pop(), needle, snippet: bb.slice(Math.max(0, idx - 500), Math.min(bb.length, idx + 1000)) });
-                  from = idx + needle.length;
-                }
-              }
-            } catch {}
-          }
-          return { hit_count: hits.length, hits };
-        })(),
-        runtime_config_summary: await (async () => {
-          const hits = [];
-          const terms = ["apiUrl", "readConfig"];
-          for (const file of files) {
-            if (!file.url || !file.looks_js) continue;
-            try {
-              const rr = await fetch(file.url, { redirect: "follow" });
-              const bb = await rr.text();
-              for (const term of terms) {
-                let from = 0;
-                while (hits.length < 30) {
-                  const idx = bb.indexOf(term, from);
-                  if (idx < 0) break;
-                  hits.push({
-                    file: file.url.split("/").pop(),
-                    term,
-                    snippet: bb.slice(Math.max(0, idx - 180), Math.min(bb.length, idx + 320))
-                  });
-                  from = idx + term.length;
-                }
-              }
-            } catch {}
-          }
-          return { hit_count: hits.length, hits };
-        })(),
-        runtime_config_snippets: await (async () => {
-          const snippets = [];
-          const terms = ["readConfig", "apiUrl", "config.json", "environment", "AppConfig", "appConfig"];
-          for (const file of files) {
-            if (!file.url || !file.looks_js) continue;
-            try {
-              const rr = await fetch(file.url, { redirect: "follow" });
-              const bb = await rr.text();
-              for (const term of terms) {
-                let from = 0;
-                while (snippets.length < 120) {
-                  const idx = bb.indexOf(term, from);
-                  if (idx < 0) break;
-                  snippets.push({
-                    file: file.url,
-                    term,
-                    snippet: bb.slice(Math.max(0, idx - 350), Math.min(bb.length, idx + 650))
-                  });
-                  from = idx + term.length;
-                }
-              }
-            } catch {}
-          }
-          return snippets;
-        })(),
-        config_probe_results: await Promise.all(
-          [
-            "/assets/config/config.json",
-            "/assets/config/config.prod.json",
-            "/assets/config/config.production.json",
-            "/assets/config/app-config.json",
-            "/assets/config.json",
-            "/config.json",
-            "/app-config.json",
-            "/assets/environment.json",
-            "/environment.json"
-          ].map(async (path) => {
-            const endpoint = "https://www.ol.fr" + path;
-            try {
-              const rr = await fetch(endpoint, { redirect: "follow", headers: { accept: "application/json,text/plain,*/*" } });
-              const bb = await rr.text();
-              return {
-                endpoint,
-                status: rr.status,
-                content_type: rr.headers.get("content-type") || "",
-                length: bb.length,
-                is_spa_html: /<!doctype html/i.test(bb),
-                prefix: bb.slice(0, 1200)
-              };
-            } catch (error) {
-              return { endpoint, error: String(error?.message || error) };
-            }
-          })
-        ),
-        files,
-        candidate_strings: [...allCandidates].slice(0, 200)
+        api_url: apiUrl,
+        header_names: Object.keys(cfg?.headers || {}),
+        results
       });
     } catch (error) {
-      return json({ ok: false, target, error: String(error?.message || error) }, { status: 500 });
+      return json({
+        ok: false,
+        error: String(error?.message || error)
+      }, { status: 500 });
     }
   }
 
