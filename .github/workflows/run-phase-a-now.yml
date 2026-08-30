@@ -1,0 +1,32 @@
+name: Run Phase A now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-a-manual-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    name: Process one Phase A batch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger protected Worker endpoint
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+        run: |
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          response="$(
+            curl --fail-with-body --silent --show-error               --request POST               --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN"               --header "Accept: application/json"               "https://club-actu.deliriousfan7.workers.dev/api/process-phase-a"
+          )"
+
+          printf '%s\n' "$response" | python3 -m json.tool
