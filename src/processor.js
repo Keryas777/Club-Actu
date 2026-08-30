@@ -182,39 +182,39 @@ function htmlExtraction(article, html) {
 
 async function getClubCandidates(db, sourceId) {
   const { results } = await db.prepare(
-    \`SELECT c.id AS club_id, cs.relation_type
+    `SELECT c.id AS club_id, cs.relation_type
      FROM club_sources cs
      JOIN clubs c ON c.id = cs.club_id
      WHERE cs.source_id = ? AND c.active = 1
-     ORDER BY cs.priority ASC, c.id ASC\`
+     ORDER BY cs.priority ASC, c.id ASC`
   ).bind(sourceId).all();
   return results || [];
 }
 
 async function getAliases(db, clubId) {
   const { results } = await db.prepare(
-    \`SELECT alias, strength
+    `SELECT alias, strength
      FROM club_aliases
      WHERE club_id = ?
-     ORDER BY CASE strength WHEN 'strong' THEN 0 ELSE 1 END, length(alias) DESC\`
+     ORDER BY CASE strength WHEN 'strong' THEN 0 ELSE 1 END, length(alias) DESC`
   ).bind(clubId).all();
   return results || [];
 }
 
 async function findCurrentExtraction(db, article) {
   return db.prepare(
-    \`SELECT *
+    `SELECT *
      FROM article_extractions
      WHERE article_id = ? AND source_content_hash = ? AND extractor_version = ?
      ORDER BY id DESC
-     LIMIT 1\`
+     LIMIT 1`
   ).bind(article.id, article.content_hash || "", EXTRACTOR_VERSION).first();
 }
 
 async function saveExtraction(db, article, extraction, status, error = null) {
   const now = new Date().toISOString();
   await db.prepare(
-    \`INSERT INTO article_extractions
+    `INSERT INTO article_extractions
       (article_id, source_content_hash, extractor_version, status, extraction_method,
        normalized_title, normalized_author, normalized_published_at,
        normalized_excerpt, normalized_content, normalized_image_url,
@@ -233,7 +233,7 @@ async function saveExtraction(db, article, extraction, status, error = null) {
        error_code = excluded.error_code,
        error_detail = excluded.error_detail,
        retry_after = excluded.retry_after,
-       updated_at = excluded.updated_at\`
+       updated_at = excluded.updated_at`
   ).bind(
     article.id,
     article.content_hash || "",
@@ -301,7 +301,7 @@ async function extractArticle(db, article) {
 async function saveAssessment(db, article, clubId, result) {
   const now = new Date().toISOString();
   await db.prepare(
-    \`INSERT INTO article_club_assessments
+    `INSERT INTO article_club_assessments
       (article_id, club_id, source_content_hash, rule_version,
        decision, reason_code, reason_detail, decided_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -309,7 +309,7 @@ async function saveAssessment(db, article, clubId, result) {
        decision = excluded.decision,
        reason_code = excluded.reason_code,
        reason_detail = excluded.reason_detail,
-       decided_at = excluded.decided_at\`
+       decided_at = excluded.decided_at`
   ).bind(
     article.id,
     clubId,
@@ -324,16 +324,16 @@ async function saveAssessment(db, article, clubId, result) {
 
 async function hasCurrentAssessment(db, article, clubId) {
   return db.prepare(
-    \`SELECT id, decision, reason_code
+    `SELECT id, decision, reason_code
      FROM article_club_assessments
      WHERE article_id = ? AND club_id = ? AND source_content_hash = ? AND rule_version = ?
-     LIMIT 1\`
+     LIMIT 1`
   ).bind(article.id, clubId, article.content_hash || "", RULE_VERSION).first();
 }
 
 async function loadCandidates(db, limit) {
   const { results } = await db.prepare(
-    \`SELECT r.*
+    `SELECT r.*
      FROM raw_articles r
      WHERE r.content_hash IS NOT NULL
        AND (
@@ -365,7 +365,7 @@ async function loadCandidates(db, limit) {
          )
        )
      ORDER BY r.last_seen_at ASC
-     LIMIT ?\`
+     LIMIT ?`
   ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), RULE_VERSION, limit).all();
   return results || [];
 }
@@ -398,8 +398,8 @@ export async function processPhaseA(db, options = {}) {
   const examples = [];
 
   await db.prepare(
-    \`INSERT INTO processing_runs (id, started_at, status, candidates)
-     VALUES (?, ?, 'running', ?)\`
+    `INSERT INTO processing_runs (id, started_at, status, candidates)
+     VALUES (?, ?, 'running', ?)`
   ).bind(runId, startedAt, candidates.length).run();
 
   for (const article of candidates) {
@@ -513,10 +513,10 @@ export async function processPhaseA(db, options = {}) {
   const status = totals.failed === candidates.length && candidates.length ? "failed" : (totals.failed || totals.retry ? "partial" : "success");
 
   await db.prepare(
-    \`UPDATE processing_runs SET
+    `UPDATE processing_runs SET
        finished_at = ?, status = ?, processed = ?, relevant = ?, rejected = ?,
        needs_review = ?, extracted = ?, ready = ?, retry = ?, failed = ?, notes = ?
-     WHERE id = ?\`
+     WHERE id = ?`
   ).bind(
     finishedAt,
     status,
@@ -544,20 +544,41 @@ export async function processPhaseA(db, options = {}) {
 
 export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8) {
   const waiting = await db.prepare(
-    \`SELECT COUNT(*) AS n
+    `SELECT COUNT(*) AS n
      FROM raw_articles r
      WHERE r.content_hash IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM article_extractions e
-         WHERE e.article_id = r.id
-           AND e.source_content_hash = r.content_hash
-           AND e.extractor_version = ?
-           AND e.status = 'completed'
-       )\`
-  ).bind(EXTRACTOR_VERSION).first();
+       AND (
+         NOT EXISTS (
+           SELECT 1 FROM article_extractions e
+           WHERE e.article_id = r.id
+             AND e.source_content_hash = r.content_hash
+             AND e.extractor_version = ?
+             AND e.status = 'completed'
+         )
+         OR EXISTS (
+           SELECT 1 FROM article_extractions e
+           WHERE e.article_id = r.id
+             AND e.source_content_hash = r.content_hash
+             AND e.extractor_version = ?
+             AND e.status = 'retry'
+             AND (e.retry_after IS NULL OR e.retry_after <= ?)
+         )
+         OR EXISTS (
+           SELECT 1 FROM club_sources cs
+           WHERE cs.source_id = r.source_id
+             AND NOT EXISTS (
+               SELECT 1 FROM article_club_assessments a
+               WHERE a.article_id = r.id
+                 AND a.club_id = cs.club_id
+                 AND a.source_content_hash = r.content_hash
+                 AND a.rule_version = ?
+             )
+         )
+       )`
+  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), RULE_VERSION).first();
 
   const counts = await db.prepare(
-    \`SELECT
+    `SELECT
        SUM(CASE WHEN a.decision = 'relevant' THEN 1 ELSE 0 END) AS relevant,
        SUM(CASE WHEN a.decision = 'rejected' THEN 1 ELSE 0 END) AS rejected,
        SUM(CASE WHEN a.decision = 'needs_review' THEN 1 ELSE 0 END) AS needs_review
@@ -565,11 +586,11 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
      JOIN raw_articles r ON r.id = a.article_id
      WHERE a.club_id = ?
        AND a.source_content_hash = r.content_hash
-       AND a.rule_version = ?\`
+       AND a.rule_version = ?`
   ).bind(clubId, RULE_VERSION).first();
 
   const ready = await db.prepare(
-    \`SELECT COUNT(*) AS n
+    `SELECT COUNT(*) AS n
      FROM article_club_assessments a
      JOIN raw_articles r ON r.id = a.article_id
      JOIN article_extractions e
@@ -580,11 +601,11 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
      WHERE a.club_id = ?
        AND a.source_content_hash = r.content_hash
        AND a.rule_version = ?
-       AND a.decision = 'relevant'\`
+       AND a.decision = 'relevant'`
   ).bind(EXTRACTOR_VERSION, clubId, RULE_VERSION).first();
 
   const { results: reasons } = await db.prepare(
-    \`SELECT a.decision, COALESCE(a.reason_code, 'unspecified') AS reason_code, COUNT(*) AS count
+    `SELECT a.decision, COALESCE(a.reason_code, 'unspecified') AS reason_code, COUNT(*) AS count
      FROM article_club_assessments a
      JOIN raw_articles r ON r.id = a.article_id
      WHERE a.club_id = ?
@@ -592,11 +613,11 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
        AND a.rule_version = ?
      GROUP BY a.decision, COALESCE(a.reason_code, 'unspecified')
      ORDER BY count DESC, reason_code ASC
-     LIMIT 20\`
+     LIMIT 20`
   ).bind(clubId, RULE_VERSION).all();
 
   const { results: examples } = await db.prepare(
-    \`SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+    `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
             a.decision, a.reason_code, a.decided_at
      FROM article_club_assessments a
      JOIN raw_articles r ON r.id = a.article_id
@@ -604,15 +625,15 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
        AND a.source_content_hash = r.content_hash
        AND a.rule_version = ?
      ORDER BY a.decided_at DESC
-     LIMIT ?\`
+     LIMIT ?`
   ).bind(clubId, RULE_VERSION, exampleLimit).all();
 
   const latestRun = await db.prepare(
-    \`SELECT id, started_at, finished_at, status, candidates, processed,
+    `SELECT id, started_at, finished_at, status, candidates, processed,
             relevant, rejected, needs_review, extracted, ready, retry, failed
      FROM processing_runs
      ORDER BY started_at DESC
-     LIMIT 1\`
+     LIMIT 1`
   ).first();
 
   return {
