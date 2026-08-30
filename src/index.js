@@ -32,8 +32,8 @@ async function handleApi(request, env, url) {
       try {
         const res = await fetch(target, { redirect: "follow" });
         const html = await res.text();
-        const baseHref = html.match(/<base\\s+href=["']([^"']+)["']/i)?.[1] || "/";
-        const rawSrcs = [...html.matchAll(/<script\\b[^>]*src=["']([^"']+)["']/gi)].map(m => m[1]);
+        const baseHref = html.match(/<base\s+href=["']([^"']+)["']/i)?.[1] || "/";
+        const rawSrcs = [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi)].map(m => m[1]);
         const origin = new URL(res.url).origin;
         const candidates = rawSrcs.map(raw => ({
           raw,
