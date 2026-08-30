@@ -134,6 +134,27 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        app_config_service_summary: await (async () => {
+          const hits = [];
+          const needles = ["readConfig(){", "readConfig() {", "readConfig=", "apiUrl:", ".apiUrl=", "configUrl", "configPath"];
+          for (const file of files) {
+            if (!file.url || !file.looks_js) continue;
+            try {
+              const rr = await fetch(file.url, { redirect: "follow" });
+              const bb = await rr.text();
+              for (const needle of needles) {
+                let from = 0;
+                while (hits.length < 20) {
+                  const idx = bb.indexOf(needle, from);
+                  if (idx < 0) break;
+                  hits.push({ file: file.url.split("/").pop(), needle, snippet: bb.slice(Math.max(0, idx - 500), Math.min(bb.length, idx + 1000)) });
+                  from = idx + needle.length;
+                }
+              }
+            } catch {}
+          }
+          return { hit_count: hits.length, hits };
+        })(),
         runtime_config_summary: await (async () => {
           const hits = [];
           const terms = ["apiUrl", "readConfig"];
