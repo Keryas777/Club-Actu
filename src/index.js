@@ -80,12 +80,31 @@ async function handleApi(request, env, url) {
         }
       }
 
+      // Extract the runtime API base URL from Angular's bundled configuration.
+      // OL's article service builds routes such as `${config.apiUrl}/articles`.
+      const apiUrlCandidates = new Set();
+      for (const file of files) {
+        if (!file.url || !file.looks_js) continue;
+        try {
+          const rr = await fetch(file.url, { redirect: "follow" });
+          const bb = await rr.text();
+          const urlMatches = bb.match(/https?:\\?\/\\?\/[^"'\`\\s,}]{4,240}/g) || [];
+          for (let value of urlMatches) {
+            value = value.replace(/\\\//g, "/");
+            if (/api|ol\.fr|olvallee|lyonnais/i.test(value)) apiUrlCandidates.add(value);
+          }
+          const configSnippets = bb.match(/.{0,180}apiUrl.{0,260}/g) || [];
+          for (const snippet of configSnippets) allCandidates.add(snippet);
+        } catch {}
+      }
+
       return json({
         ok: true,
         target,
         status: res.status,
         root_scripts: rootScripts,
         scanned_file_count: files.length,
+        api_url_candidates: [...apiUrlCandidates].slice(0, 100),
         files,
         candidate_strings: [...allCandidates].slice(0, 200)
       });
