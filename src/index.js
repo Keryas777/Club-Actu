@@ -134,6 +134,26 @@ async function handleApi(request, env, url) {
               return { base: normalized, results };
             })
         ),
+        ol_app_config_fetch: await (async () => {
+          const urls = [
+            "https://www.ol.fr/app-config.json",
+            "https://www.ol.fr/assets/app-config.json"
+          ];
+          const results = [];
+          for (const url of urls) {
+            try {
+              const rr = await fetch(url, { redirect: "follow" });
+              const body = await rr.text();
+              results.push({
+                url, status: rr.status, content_type: rr.headers.get("content-type"),
+                length: body.length,
+                is_spa_html: /<!doctype html|<html/i.test(body.slice(0,500)),
+                body: body.slice(0, 12000)
+              });
+            } catch (e) { results.push({ url, error: String(e) }); }
+          }
+          return results;
+        })(),
         app_config_service_summary: await (async () => {
           const hits = [];
           const needles = ["readConfig(){", "readConfig() {", "readConfig=", "apiUrl:", ".apiUrl=", "configUrl", "configPath"];
