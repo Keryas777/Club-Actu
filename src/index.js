@@ -18,6 +18,12 @@ function parseLimit(url, fallback = 25, max = 100) {
   return Math.max(1, Math.min(max, Math.trunc(n)));
 }
 
+function bearerToken(request) {
+  const auth = request.headers.get("Authorization") || "";
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1] : null;
+}
+
 async function handleApi(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
 
@@ -96,6 +102,20 @@ async function handleApi(request, env, url) {
       recent_articles: recent,
       suspicious_legacy_rows: suspicious
     });
+  }
+
+  if (url.pathname === "/api/process-phase-a" && request.method === "POST") {
+    if (!env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+    }
+
+    const token = bearerToken(request);
+    if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const result = await processPhaseA(env.DB, { limit: 25 });
+    return json({ ok: true, trigger: "manual", ...result });
   }
 
   if (url.pathname === "/api/processing-status" && request.method === "GET") {
