@@ -139,13 +139,15 @@ async function handleApi(request, env, url) {
   }
 
   if (url.pathname === "/api/sources" && request.method === "GET") {
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
     const { results } = await env.DB.prepare(
       `SELECT s.*, cs.relation_type, cs.priority
        FROM sources s
-       LEFT JOIN club_sources cs ON cs.source_id = s.id AND cs.club_id = 'ol'
-       ORDER BY cs.priority ASC, s.name ASC`
-    ).all();
-    return json({ ok: true, count: results.length, sources: results });
+       LEFT JOIN club_sources cs ON cs.source_id = s.id AND cs.club_id = ?
+       ORDER BY CASE WHEN cs.priority IS NULL THEN 1 ELSE 0 END,
+                cs.priority ASC, s.name ASC`
+    ).bind(club).all();
+    return json({ ok: true, club_id: club, count: results.length, sources: results });
   }
 
   if (url.pathname === "/api/articles" && request.method === "GET") {
