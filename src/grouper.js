@@ -1,4 +1,4 @@
-const PREVIEW_VERSION = "phase-b-preview-v1";
+const PREVIEW_VERSION = "phase-b-preview-v2";
 const DEFAULT_WINDOW_HOURS = 48;
 
 const STOPWORDS = new Set([
@@ -10,7 +10,9 @@ const STOPWORDS = new Set([
   "qui","sa","sans","se","ses","si","son","sont","sur","ta","te","tes","ton","tous",
   "tout","toute","toutes","tu","un","une","vos","votre","vous",
   "football","foot","ligue","championnat","match","club","equipe","equipe","joueur","joueurs",
-  "mercato","transfert","transferts","actualite","direct","officiel","officielle","france",
+  "mercato","transfert","transferts","actualite","direct","officiel","officielle","france","sport",
+  "info","infos","news","dossier","dossiers","fermeture","marche","ete","hiver","avant","apres",
+  "defenseur","milieu","attaquant","gardien","avance","anime","cible","ciblee","cibles",
   "million","millions","euros","euro","saison","journee","j","c1","c3"
 ]);
 
@@ -68,6 +70,11 @@ function articleTokens(article, ignored) {
   };
 }
 
+function entityLikeTokens(tokens = []) {
+  // Rare/specific tokens are useful proxies for named entities at this cheap candidate stage.
+  return tokens.filter((token) => token.length >= 4 && !/^\\d+$/.test(token));
+}
+
 function intersection(a, b) {
   const bSet = new Set(b);
   return a.filter((token) => bSet.has(token));
@@ -123,6 +130,10 @@ function classifyPair(score, sharedTitle, sharedContext, hours) {
       sharedTitle.length >= 1 &&
       sharedContext.length >= 3 &&
       (hours == null || hours <= 12)
+    ) ||
+    (
+      sharedContext.filter((token) => token.length >= 4).length >= 2 &&
+      (hours == null || hours <= 12)
     )
   ) return "possible";
   return "none";
@@ -135,14 +146,18 @@ export function scoreArticlePair(a, b, tokenA, tokenB, weights) {
   const sharedTitle = intersection(tokenA.title, tokenB.title);
   const sharedContext = intersection(tokenA.context, tokenB.context);
   const hours = timeDistanceHours(a, b);
+  const sharedEntities = intersection(entityLikeTokens(tokenA.context), entityLikeTokens(tokenB.context));
+  const entityBonus = Math.min(0.24, sharedEntities.length * 0.08);
+  const entityScore = Math.min(1, score + entityBonus);
   return {
-    score,
+    score: entityScore,
     title_score: titleScore,
     context_score: contextScore,
     shared_title_tokens: sharedTitle,
     shared_context_tokens: sharedContext,
+    shared_entity_tokens: sharedEntities,
     hours_apart: hours,
-    confidence: classifyPair(score, sharedTitle, sharedContext, hours)
+    confidence: classifyPair(entityScore, sharedTitle, sharedContext, hours)
   };
 }
 
@@ -166,6 +181,7 @@ export function buildPreviewPairs(articles, aliases = [], maxPairs = 30) {
         hours_apart: scored.hours_apart == null ? null : Number(scored.hours_apart.toFixed(2)),
         shared_title_tokens: scored.shared_title_tokens.slice(0, 12),
         shared_context_tokens: scored.shared_context_tokens.slice(0, 16),
+        shared_entity_tokens: scored.shared_entity_tokens.slice(0, 10),
         left: {
           id: articles[i].id,
           source_id: articles[i].source_id,

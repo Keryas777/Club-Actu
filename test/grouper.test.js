@@ -109,3 +109,24 @@ test("similar stories outside time window are ignored", () => {
   const pairs = buildPreviewPairs(rows, ["PSG"], 10);
   assert.equal(pairs.length, 0);
 });
+
+
+test("generic editorial words do not create a candidate", () => {
+  const rows = [
+    { id:"a", source_id:"a", title:"Mercato : avant la fermeture, le dossier du défenseur avance", excerpt:"Le marché est animé.", content:"", published_at:"2026-08-31T06:00:00Z" },
+    { id:"b", source_id:"b", title:"Mercato : avant la fermeture, un dossier du milieu avance", excerpt:"Le marché est animé.", content:"", published_at:"2026-08-31T07:00:00Z" }
+  ];
+  const pairs = buildPreviewPairs(rows, ["PSG"], 10);
+  assert.equal(pairs.length, 0);
+});
+
+test("same named transfer target survives different headline wording", () => {
+  const rows = [
+    { id:"a", source_id:"a", title:"Balerdi à Rome, accord trouvé", excerpt:"Leonardo Balerdi va quitter Marseille pour la Roma.", content:"", published_at:"2026-08-31T06:00:00Z" },
+    { id:"b", source_id:"b", title:"Le défenseur argentin a posé ses valises en Italie", excerpt:"Leonardo Balerdi est attendu à la Roma après un accord avec l'OM.", content:"", published_at:"2026-08-31T07:00:00Z" }
+  ];
+  const pairs = buildPreviewPairs(rows, ["OM","Olympique de Marseille","Marseille"], 10);
+  assert.equal(pairs.length, 1);
+  assert.ok(pairs[0].shared_entity_tokens.includes("balerdi"));
+  assert.ok(pairs[0].shared_entity_tokens.includes("roma"));
+});
