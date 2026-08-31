@@ -36,6 +36,13 @@ export const SOURCE_ADAPTERS = {
     discoveryUrl: "https://www.leprogres.fr/sport/ol-olympique-lyonnais-football",
     articleHosts: ["leprogres.fr", "www.leprogres.fr"],
     includePath: /\/sport\//i
+  },
+  sport365: {
+    id: "sport365",
+    discoveryUrl: "https://www.sport365.fr/football365",
+    articleHosts: ["sport365.fr", "www.sport365.fr"],
+    articlePath: /-\d{6,}\.html$/i,
+    includePath: /\.html$/i
   }
 };
 
