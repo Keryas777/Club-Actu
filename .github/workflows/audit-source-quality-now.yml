@@ -1,0 +1,184 @@
+name: Audit source quality now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-quality-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit source URLs and titles
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch source samples
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+
+          for source in             sports_fr             topmercato             butfootballclub             ferveur_lyonnaise             madeingones             sports_orange             sport365
+          do
+            curl --fail-with-body --silent --show-error               "$BASE_URL/api/articles?source=$source&limit=100"               -o "audit/$source.json"
+          done
+
+      - name: Analyze samples
+        run: |
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          sources = [
+              ("sports_fr", "Sports.fr"),
+              ("topmercato", "Top Mercato"),
+              ("butfootballclub", "But! Football Club"),
+              ("ferveur_lyonnaise", "Ferveur Lyonnaise"),
+              ("madeingones", "MadeInGones"),
+              ("sports_orange", "Sports Orange"),
+              ("sport365", "Sport365"),
+          ]
+
+          suspicious_path = re.compile(
+              r"/(?:tag|tags|categorie|category|author|auteur|page|archives?|"
+              r"classement|calendrier|resultats?|equipe|effectif|mercato/?$|football/?$)(?:/|$)",
+              re.I,
+          )
+          suspicious_title = re.compile(
+              r"^(?:accueil|football|mercato|classement|calendrier|résultats?|"
+              r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
+              re.I,
+          )
+
+          def classify(article):
+              title = (article.get("title") or "").strip()
+              url = article.get("url") or ""
+              path = urlparse(url).path
+
+              reasons = []
+              if len(title) < 18:
+                  reasons.append("title_too_short")
+              if suspicious_title.search(title):
+                  reasons.append("navigation_title")
+              if suspicious_path.search(path):
+                  reasons.append("navigation_path")
+              if path in ("", "/"):
+                  reasons.append("root_path")
+              return reasons
+
+          print("=== SOURCE QUALITY AUDIT ===")
+          print()
+
+          overall_suspicious = 0
+          for source_id, label in sources:
+              data = json.loads(Path(f"audit/{source_id}.json").read_text(encoding="utf-8"))
+              articles = data.get("articles", [])
+              suspicious = []
+
+              for article in articles:
+                  reasons = classify(article)
+                  if reasons:
+                      suspicious.append((article, reasons))
+
+              overall_suspicious += len(suspicious)
+
+              print(f"=== {label} ({source_id}) ===")
+              print(f"sample_count={len(articles)}")
+              print(f"suspicious_count={len(suspicious)}")
+
+              print("-- newest 20 --")
+              for article in articles[:20]:
+                  print(
+                      f"{article.get('published_at') or article.get('last_seen_at')} | "
+                      f"{article.get('title')} | {article.get('url')}"
+                  )
+
+              if suspicious:
+                  print("-- suspicious --")
+                  for article, reasons in suspicious[:30]:
+                      print(
+                          f"{','.join(reasons)} | "
+                          f"{article.get('title')} | {article.get('url')}"
+                      )
+              print()
+
+          print(f"TOTAL_SUSPICIOUS={overall_suspicious}")
+          PY
+
+      - name: Write GitHub job summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, re
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          sources = [
+              ("sports_fr", "Sports.fr"),
+              ("topmercato", "Top Mercato"),
+              ("butfootballclub", "But! Football Club"),
+              ("ferveur_lyonnaise", "Ferveur Lyonnaise"),
+              ("madeingones", "MadeInGones"),
+              ("sports_orange", "Sports Orange"),
+              ("sport365", "Sport365"),
+          ]
+
+          suspicious_path = re.compile(
+              r"/(?:tag|tags|categorie|category|author|auteur|page|archives?|"
+              r"classement|calendrier|resultats?|equipe|effectif|mercato/?$|football/?$)(?:/|$)",
+              re.I,
+          )
+          suspicious_title = re.compile(
+              r"^(?:accueil|football|mercato|classement|calendrier|résultats?|"
+              r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
+              re.I,
+          )
+
+          def reasons(article):
+              title = (article.get("title") or "").strip()
+              path = urlparse(article.get("url") or "").path
+              out = []
+              if len(title) < 18:
+                  out.append("short title")
+              if suspicious_title.search(title):
+                  out.append("nav title")
+              if suspicious_path.search(path):
+                  out.append("nav path")
+              if path in ("", "/"):
+                  out.append("root")
+              return out
+
+          print("# Club Actu — source quality audit")
+          print()
+          print("| Source | Sample | Suspicious | Verdict |")
+          print("|---|---:|---:|---|")
+
+          details = []
+          for source_id, label in sources:
+              data = json.loads(Path(f"audit/{source_id}.json").read_text(encoding="utf-8"))
+              articles = data.get("articles", [])
+              bad = [(a, reasons(a)) for a in articles if reasons(a)]
+              if not bad:
+                  verdict = "✅ clean on heuristic sample"
+              elif len(bad) <= 2:
+                  verdict = "🟡 inspect"
+              else:
+                  verdict = "🔴 adapter likely too broad"
+              print(f"| {label} | {len(articles)} | {len(bad)} | {verdict} |")
+              details.append((label, bad))
+
+          for label, bad in details:
+              if not bad:
+                  continue
+              print()
+              print(f"## {label} — suspicious samples")
+              for article, why in bad[:10]:
+                  title = str(article.get("title") or "").replace("|", "\\|")
+                  url = article.get("url") or ""
+                  print(f"- **{', '.join(why)}** — {title} — {url}")
+          PY
