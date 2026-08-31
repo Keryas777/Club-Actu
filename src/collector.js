@@ -174,7 +174,7 @@ function extractXmlTag(block, tag) {
   const re = new RegExp("<" + tag + "\\b[^>]*>([\\s\\S]*?)<\\/" + tag + ">", "i");
   const m = re.exec(block);
   if (!m) return "";
-  return decodeEntities(m[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, "$1").replace(/<[^>]+>/g, " "));
+  return decodeEntities(m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1").replace(/<[^>]+>/g, " "));
 }
 
 function discoverRss(xml, adapter) {
