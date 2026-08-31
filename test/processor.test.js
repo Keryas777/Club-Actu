@@ -261,7 +261,7 @@ test("weak aliases mentioned only deep in body do not create review noise", () =
     aliases: [{ alias: "Lyon", strength: "weak" }],
     title: "Une actualité sans rapport avec le club",
     excerpt: "Le sujet concerne une autre équipe.",
-    content: ("Le texte développe un autre sujet sportif. ".repeat(20)) + "Un déplacement à Lyon est évoqué en fin d'article."
+    content: ("Le texte développe un autre sujet sportif. ".repeat(30)) + "Un déplacement à Lyon est évoqué en fin d'article."
   });
   assertDecision(result, "rejected", "club_not_relevant");
 });
