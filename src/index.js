@@ -1,5 +1,5 @@
 import { collectAll, repairMojibake, normalizeStoredEntities } from "./collector.js";
-import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit } from "./processor.js";
+import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
 
 function json(data, init = {}) {
@@ -145,6 +145,13 @@ async function handleApi(request, env, url) {
 
     const result = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
     return json({ ok: true, trigger: "manual", ...result });
+  }
+
+  if (url.pathname === "/api/relevance-v3-preview" && request.method === "GET") {
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
+    const limit = parseLimit(url, 100, 200);
+    const preview = await getRelevanceV3Preview(env.DB, club, limit);
+    return json({ ok: true, ...preview });
   }
 
   if (url.pathname === "/api/relevance-audit" && request.method === "GET") {
