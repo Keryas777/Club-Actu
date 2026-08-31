@@ -1,0 +1,54 @@
+name: Normalize stored text now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: normalize-stored-text
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    name: Normalize historical HTML entities
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Normalize historical rows
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          total_changed=0
+
+          for pass in $(seq 1 20); do
+            response="$(
+              curl --fail-with-body --silent --show-error \
+                --request POST \
+                --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+                --header "Accept: application/json" \
+                "$BASE_URL/api/normalize-stored-text"
+            )"
+
+            printf '%s\n' "$response" | python3 -m json.tool
+
+            changed="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("changed",0))')"
+            scanned="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("scanned",0))')"
+
+            total_changed=$((total_changed + changed))
+
+            if [ "$changed" -eq 0 ] || [ "$scanned" -eq 0 ]; then
+              break
+            fi
+          done
+
+          echo "Total historical rows normalized: $total_changed"
