@@ -1,5 +1,5 @@
 import { collectAll, repairMojibake } from "./collector.js";
-import { drainPhaseA, getProcessingDiagnostics } from "./processor.js";
+import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
 
 function json(data, init = {}) {
@@ -131,6 +131,13 @@ async function handleApi(request, env, url) {
 
     const result = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
     return json({ ok: true, trigger: "manual", ...result });
+  }
+
+  if (url.pathname === "/api/relevance-audit" && request.method === "GET") {
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
+    const limit = parseLimit(url, 50, 100);
+    const audit = await getRelevanceAudit(env.DB, club, limit);
+    return json({ ok: true, ...audit });
   }
 
   if (url.pathname === "/api/processing-status" && request.method === "GET") {
