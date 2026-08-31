@@ -455,7 +455,7 @@ export async function normalizeStoredEntities(db, limit = 100) {
     articleStatements.push(
       db.prepare(
         `UPDATE raw_articles
-         SET title = ?, excerpt = ?, content_hash = ?, updated_at = CURRENT_TIMESTAMP
+         SET title = ?, excerpt = ?, content_hash = ?
          WHERE id = ?`
       ).bind(normalizedTitle, normalizedExcerpt || null, nextHash, row.id)
     );
