@@ -285,14 +285,15 @@ async function upsertArticles(db, sourceId, items, now) {
 
   let inserted = 0;
   let updated = 0;
-  const statements = [];
+  const articleStatements = [];
+  const versionStatements = [];
 
   for (const item of prepared) {
     const existing = existingByUrl.get(item.url);
 
     if (!existing) {
       inserted++;
-      statements.push(
+      articleStatements.push(
         db.prepare(
           `INSERT INTO raw_articles
           (id, source_id, url, canonical_url, title, published_at, excerpt,
@@ -303,7 +304,9 @@ async function upsertArticles(db, sourceId, items, now) {
           item.id, sourceId, item.url, item.url, item.normalizedTitle,
           item.publishedAt, item.normalizedExcerpt || null, item.discoveryMethod,
           now, now, item.contentHash
-        ),
+        )
+      );
+      versionStatements.push(
         db.prepare(
           `INSERT OR IGNORE INTO article_versions
            (article_id, content_hash, title, excerpt, captured_at)
@@ -317,7 +320,7 @@ async function upsertArticles(db, sourceId, items, now) {
     }
 
     updated++;
-    statements.push(
+    articleStatements.push(
       db.prepare(
         `UPDATE raw_articles SET
            last_seen_at = ?, title = ?, published_at = COALESCE(?, published_at),
@@ -331,7 +334,7 @@ async function upsertArticles(db, sourceId, items, now) {
     );
 
     if (existing.content_hash !== item.contentHash) {
-      statements.push(
+      versionStatements.push(
         db.prepare(
           `INSERT OR IGNORE INTO article_versions
            (article_id, content_hash, title, excerpt, captured_at)
@@ -344,10 +347,13 @@ async function upsertArticles(db, sourceId, items, now) {
     }
   }
 
-  // Keep each D1 batch modest. This removes hundreds of serial round-trips
-  // while avoiding one oversized batch when many sources are active.
-  for (let i = 0; i < statements.length; i += 50) {
-    await db.batch(statements.slice(i, i + 50));
+  // Parent rows must exist before article_versions because D1 enforces the
+  // foreign key immediately. Keep each batch modest to avoid oversized calls.
+  for (let i = 0; i < articleStatements.length; i += 50) {
+    await db.batch(articleStatements.slice(i, i + 50));
+  }
+  for (let i = 0; i < versionStatements.length; i += 50) {
+    await db.batch(versionStatements.slice(i, i + 50));
   }
 
   return { inserted, updated };
