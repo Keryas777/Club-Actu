@@ -150,8 +150,11 @@ async function handleApi(request, env, url) {
   if (url.pathname === "/api/relevance-audit" && request.method === "GET") {
     const club = (url.searchParams.get("club") || "ol").trim() || "ol";
     const limit = parseLimit(url, 50, 100);
-    const audit = await getRelevanceAudit(env.DB, club, limit);
-    return json({ ok: true, ...audit });
+    const compact = ["1", "true", "yes"].includes(
+      (url.searchParams.get("compact") || "").trim().toLowerCase()
+    );
+    const audit = await getRelevanceAudit(env.DB, club, limit, { compact });
+    return json({ ok: true, compact, ...audit });
   }
 
   if (url.pathname === "/api/processing-status" && request.method === "GET") {
