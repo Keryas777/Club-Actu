@@ -13,6 +13,13 @@
     }
   ],
   "triggers": {
-    "crons": ["*/30 * * * *"]
+    "crons": [
+      "*/30 * * * *"
+    ]
+  },
+  "keep_vars": true,
+  "vars": {
+    "ROLE_CLASSIFIER_BASE_URL": "https://api.groq.com/openai/v1",
+    "ROLE_CLASSIFIER_MODEL": "openai/gpt-oss-20b"
   }
 }
