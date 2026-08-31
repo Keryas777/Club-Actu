@@ -214,6 +214,7 @@ function discoverLinks(html, adapter) {
     const u = new URL(url);
     if (!adapter.articleHosts.includes(u.hostname)) continue;
     if (adapter.includePath && !adapter.includePath.test(u.pathname)) continue;
+    if (adapter.excludePath && adapter.excludePath.test(u.pathname)) continue;
     if (!looksLikeArticleUrl(url, adapter)) continue;
     const title = stripTags(m[2]);
     if (!looksLikeArticleTitle(title)) continue;

@@ -47,11 +47,11 @@ jobs:
 
           suspicious_path = re.compile(
               r"/(?:tag|tags|categorie|category|author|auteur|page|archives?|"
-              r"classement|calendrier|resultats?|equipe|effectif|mercato/?$|football/?$)(?:/|$)",
+              r"classement|calendrier|resultats?|equipe|effectif)(?:/|$)",
               re.I,
           )
           suspicious_title = re.compile(
-              r"^(?:accueil|football|mercato|classement|calendrier|résultats?|"
+              r"^(?:accueil|football|classement|calendrier|résultats?|"
               r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
               re.I,
           )
@@ -130,11 +130,11 @@ jobs:
 
           suspicious_path = re.compile(
               r"/(?:tag|tags|categorie|category|author|auteur|page|archives?|"
-              r"classement|calendrier|resultats?|equipe|effectif|mercato/?$|football/?$)(?:/|$)",
+              r"classement|calendrier|resultats?|equipe|effectif)(?:/|$)",
               re.I,
           )
           suspicious_title = re.compile(
-              r"^(?:accueil|football|mercato|classement|calendrier|résultats?|"
+              r"^(?:accueil|football|classement|calendrier|résultats?|"
               r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
               re.I,
           )
