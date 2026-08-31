@@ -179,7 +179,7 @@ function extractXmlTag(block, tag) {
 
 function discoverRss(xml, adapter) {
   const found = new Map();
-  const itemRe = /<item\\b[^>]*>([\\s\\S]*?)<\\/item>/gi;
+  const itemRe = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
   let m;
   while ((m = itemRe.exec(xml))) {
     const block = m[1];
