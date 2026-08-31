@@ -104,6 +104,20 @@ async function handleApi(request, env, url) {
     });
   }
 
+  if (url.pathname === "/api/collect-now" && request.method === "POST") {
+    if (!env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+    }
+
+    const token = bearerToken(request);
+    if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const result = await collectAll(env.DB);
+    return json({ ok: true, trigger: "manual_collection", ...result });
+  }
+
   if (url.pathname === "/api/process-phase-a" && request.method === "POST") {
     if (!env.MANUAL_TRIGGER_TOKEN) {
       return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
