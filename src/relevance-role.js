@@ -159,7 +159,37 @@ export async function classifyRoleWithProvider(env, input) {
       body: JSON.stringify({
         model,
         temperature: 0,
-        max_tokens: 180,
+        max_completion_tokens: 220,
+        reasoning_effort: "low",
+        reasoning_format: "hidden",
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "club_relevance_role",
+            strict: true,
+            schema: {
+              type: "object",
+              properties: {
+                role: {
+                  type: "string",
+                  enum: ROLE_LABELS
+                },
+                confidence: {
+                  type: "number",
+                  minimum: 0,
+                  maximum: 1
+                },
+                rationale: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: 240
+                }
+              },
+              required: ["role", "confidence", "rationale"],
+              additionalProperties: false
+            }
+          }
+        },
         messages: buildRoleClassifierPrompt(input)
       })
     });
