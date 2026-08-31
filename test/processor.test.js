@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assessClubRelevance, classifyTechnicalArticle } from "../src/processor.js";
+import { assessClubRelevance, classifyTechnicalArticle, previewV3Decision } from "../src/processor.js";
 
 function assertDecision(actual, decision, reasonCode) {
   assert.equal(actual.decision, decision);
@@ -298,4 +298,44 @@ test("reason detail exposes context for a deep body-only mention", () => {
   const detail = JSON.parse(result.reason_detail);
   assert.equal(detail.matched_field, "body");
   assert.match(detail.match_context, /rencontre face au PSG/i);
+});
+
+
+test("Phase A v3 preview keeps direct and title relevance unchanged", () => {
+  assert.deepEqual(
+    previewV3Decision("relevant", "direct_club_source"),
+    { decision: "relevant", reason_code: "direct_club_source" }
+  );
+  assert.deepEqual(
+    previewV3Decision("relevant", "strong_alias_title"),
+    { decision: "relevant", reason_code: "strong_alias_title" }
+  );
+});
+
+test("Phase A v3 preview moves excerpt and lead auto-relevance to review", () => {
+  assert.deepEqual(
+    previewV3Decision("relevant", "strong_alias_excerpt"),
+    {
+      decision: "needs_review",
+      reason_code: "strong_alias_excerpt_role_review"
+    }
+  );
+  assert.deepEqual(
+    previewV3Decision("relevant", "strong_alias_lead"),
+    {
+      decision: "needs_review",
+      reason_code: "strong_alias_lead_role_review"
+    }
+  );
+});
+
+test("Phase A v3 preview leaves existing review and rejected decisions unchanged", () => {
+  assert.deepEqual(
+    previewV3Decision("needs_review", "strong_alias_body_only"),
+    { decision: "needs_review", reason_code: "strong_alias_body_only" }
+  );
+  assert.deepEqual(
+    previewV3Decision("rejected", "club_not_relevant"),
+    { decision: "rejected", reason_code: "club_not_relevant" }
+  );
 });
