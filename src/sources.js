@@ -43,7 +43,7 @@ export const SOURCE_ADAPTERS = {
     articleHosts: ["sport365.fr", "www.sport365.fr"],
     articlePath: /-\d{6,}\.html$/i,
     includePath: /\.html$/i
-  }
+  },
   sports_fr: {
     id: "sports_fr",
     discoveryMode: "rss",
