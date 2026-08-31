@@ -106,6 +106,7 @@ function buildAliasEvidence(aliases, title, excerpt, content) {
   const cleanExcerpt = compactSpace(excerpt);
   const cleanContent = compactSpace(content);
   const lead = cleanContent.slice(0, 900);
+  const bodyAfterLead = cleanContent.slice(900);
 
   return aliases.map((entry) => {
     const evidence = {
@@ -114,7 +115,8 @@ function buildAliasEvidence(aliases, title, excerpt, content) {
       title: aliasMatches(cleanTitle, entry.alias),
       excerpt: aliasMatches(cleanExcerpt, entry.alias),
       lead: aliasMatches(lead, entry.alias),
-      body: aliasMatches(cleanContent, entry.alias)
+      body: aliasMatches(cleanContent, entry.alias),
+      body_after_lead: aliasMatches(bodyAfterLead, entry.alias)
     };
     evidence.total = evidence.title + evidence.excerpt + evidence.body;
     return evidence;
@@ -171,7 +173,7 @@ export function assessClubRelevance({ relationType, aliases, title, excerpt, con
     };
   }
 
-  const bodyStrong = strong.find((item) => item.body > 0);
+  const bodyStrong = strong.find((item) => item.body_after_lead > 0);
   if (bodyStrong) {
     return {
       decision: "needs_review",
