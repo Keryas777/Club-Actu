@@ -46,18 +46,57 @@ export function repairMojibake(text = "") {
   return current;
 }
 
-function decodeEntities(text = "") {
-  return repairMojibake(
-    text
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;|&apos;/gi, "'")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/\s+/g, " ")
-      .trim()
-  );
+const NAMED_HTML_ENTITIES = new Map([
+  ["nbsp", " "],
+  ["amp", "&"],
+  ["quot", '"'],
+  ["apos", "'"],
+  ["lt", "<"],
+  ["gt", ">"],
+  ["lsquo", "‘"],
+  ["rsquo", "’"],
+  ["ldquo", "“"],
+  ["rdquo", "”"],
+  ["ndash", "–"],
+  ["mdash", "—"],
+  ["hellip", "…"],
+  ["laquo", "«"],
+  ["raquo", "»"],
+  ["euro", "€"],
+  ["copy", "©"],
+  ["reg", "®"],
+  ["trade", "™"]
+]);
+
+function decodeEntityPass(text = "") {
+  return String(text)
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (match, hex, dec) => {
+      const codePoint = Number.parseInt(hex || dec, hex ? 16 : 10);
+      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10FFFF) {
+        return match;
+      }
+      try {
+        return String.fromCodePoint(codePoint);
+      } catch {
+        return match;
+      }
+    })
+    .replace(/&([a-z][a-z0-9]+);/gi, (match, name) => {
+      return NAMED_HTML_ENTITIES.get(String(name).toLowerCase()) ?? match;
+    });
+}
+
+export function decodeEntities(text = "") {
+  let current = String(text || "");
+  for (let i = 0; i < 3; i++) {
+    const decoded = decodeEntityPass(current);
+    if (decoded === current) break;
+    current = decoded;
+  }
+
+  return repairMojibake(current)
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function stripTags(html = "") {
@@ -169,8 +208,8 @@ async function discoverOlApi(adapter) {
   const rows = Array.isArray(payload && payload.data) ? payload.data : [];
   return rows.filter((row) => row && row.slug && row.title).map((row) => ({
     url: canonicalize(new URL(String(row.slug), adapter.articleBaseUrl).toString()),
-    title: repairMojibake(row.title || ""),
-    excerpt: repairMojibake(row.description || ""),
+    title: decodeEntities(row.title || ""),
+    excerpt: decodeEntities(row.description || ""),
     publishedAt: row.publish_date || row.publishedAt || null,
     discoveryMethod: "api"
   }));
@@ -254,8 +293,8 @@ async function upsertArticles(db, sourceId, items, now) {
   if (!items.length) return { inserted: 0, updated: 0 };
 
   const prepared = await Promise.all(items.map(async (item) => {
-    const normalizedTitle = repairMojibake(item.title || "");
-    const normalizedExcerpt = repairMojibake(item.excerpt || "");
+    const normalizedTitle = decodeEntities(item.title || "");
+    const normalizedExcerpt = decodeEntities(item.excerpt || "");
     const publishedAt = item.publishedAt || null;
     const discoveryMethod = item.discoveryMethod || "html_links";
     const id = await sha256Hex(sourceId + "|" + item.url);
