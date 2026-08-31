@@ -22,6 +22,7 @@ jobs:
           node --check src/processor.js
           node --check src/index.js
           node --check src/sources.js
+          node --check src/grouper.js
 
       - name: Run unit tests
         run: npm test

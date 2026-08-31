@@ -1,5 +1,6 @@
 import { collectAll, repairMojibake } from "./collector.js";
 import { drainPhaseA, getProcessingDiagnostics } from "./processor.js";
+import { getPhaseBPreview } from "./grouper.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -150,6 +151,18 @@ async function handleApi(request, env, url) {
       extractionStatus
     });
     return json({ ok: true, ...diagnostics });
+  }
+
+  if (url.pathname === "/api/phase-b-preview" && request.method === "GET") {
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
+    const articleLimit = parseLimit(url, 60, 120);
+    const pairLimitRaw = Number(url.searchParams.get("pairs") || 30);
+    const pairLimit = Number.isFinite(pairLimitRaw)
+      ? Math.max(1, Math.min(100, Math.trunc(pairLimitRaw)))
+      : 30;
+
+    const preview = await getPhaseBPreview(env.DB, club, articleLimit, pairLimit);
+    return json({ ok: true, ...preview });
   }
 
   if (url.pathname === "/api/sources" && request.method === "GET") {
