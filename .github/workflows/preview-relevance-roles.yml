@@ -16,6 +16,7 @@ on:
         description: Maximum ambiguous articles to classify
         required: true
         default: "20"
+        type: string
 
 permissions:
   contents: read
