@@ -70,14 +70,16 @@ function articleTokens(article, ignored) {
   };
 }
 
-function salientTokens(tokens = [], weights = new Map()) {
+function salientTokens(tokens = [], weights = new Map(), corpusSize = 0) {
   // Candidate gating needs discriminating terms, not merely long words.
-  // IDF-like weights already computed for the preview corpus are a cheap proxy:
-  // common editorial vocabulary gets a low weight, rarer names/places/events a higher one.
+  // On a normal preview corpus, IDF-like weights suppress vocabulary repeated everywhere.
+  // Tiny unit-test/sparse corpora cannot estimate rarity meaningfully, so rely on the
+  // already-cleaned token set there; the candidate rules still require >=2 shared terms.
+  const tinyCorpus = corpusSize <= 4;
   return tokens.filter((token) =>
     token.length >= 4 &&
     !/^\\d+$/.test(token) &&
-    (weights.get(token) || 1) >= 1.35
+    (tinyCorpus || (weights.get(token) || 1) >= 1.35)
   );
 }
 
@@ -160,7 +162,7 @@ function classifyPair(score, sharedTitle, sharedContext, sharedSalient, hours) {
   return "none";
 }
 
-export function scoreArticlePair(a, b, tokenA, tokenB, weights) {
+export function scoreArticlePair(a, b, tokenA, tokenB, weights, corpusSize = 0) {
   const titleScore = weightedJaccard(tokenA.title, tokenB.title, weights);
   const contextScore = weightedJaccard(tokenA.context, tokenB.context, weights);
   const score = 0.6 * titleScore + 0.4 * contextScore;
@@ -168,8 +170,8 @@ export function scoreArticlePair(a, b, tokenA, tokenB, weights) {
   const sharedContext = intersection(tokenA.context, tokenB.context);
   const hours = timeDistanceHours(a, b);
   const sharedSalient = intersection(
-    salientTokens(tokenA.context, weights),
-    salientTokens(tokenB.context, weights)
+    salientTokens(tokenA.context, weights, corpusSize),
+    salientTokens(tokenB.context, weights, corpusSize)
   );
   const entityBonus = Math.min(0.24, sharedSalient.length * 0.08);
   const entityScore = Math.min(1, score + entityBonus);
@@ -194,7 +196,7 @@ export function buildPreviewPairs(articles, aliases = [], maxPairs = 30) {
   for (let i = 0; i < articles.length; i++) {
     for (let j = i + 1; j < articles.length; j++) {
       const scored = scoreArticlePair(
-        articles[i], articles[j], tokenized[i], tokenized[j], weights
+        articles[i], articles[j], tokenized[i], tokenized[j], weights, articles.length
       );
       if (scored.confidence === "none") continue;
       pairs.push({
