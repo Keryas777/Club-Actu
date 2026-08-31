@@ -65,7 +65,7 @@ test("clickbait titles can still match from article context", () => {
     {
       id: "a",
       source_id: "source_a",
-      title: "Coup de tonnerre, il a pris sa décision !",
+      title: "Coup de tonnerre, Barcola a pris sa décision !",
       excerpt: "Bradley Barcola a donné son accord à Liverpool, qui discute avec le PSG.",
       content: "",
       published_at: "2026-08-31T06:00:00Z"
