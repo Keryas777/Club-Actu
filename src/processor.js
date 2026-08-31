@@ -1100,6 +1100,11 @@ export async function runRoleClassifierPreview(db, env, clubId = "ol", exampleLi
       env.ROLE_CLASSIFIER_MODEL &&
       env.ROLE_CLASSIFIER_API_KEY
     ),
+    bindings: {
+      base_url: Boolean(env.ROLE_CLASSIFIER_BASE_URL),
+      model: Boolean(env.ROLE_CLASSIFIER_MODEL),
+      api_key: Boolean(env.ROLE_CLASSIFIER_API_KEY)
+    },
     count: classified.length,
     summary,
     results: classified

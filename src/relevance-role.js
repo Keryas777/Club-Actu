@@ -126,7 +126,12 @@ export async function classifyRoleWithProvider(env, input) {
     return {
       configured: false,
       classifier_version: ROLE_CLASSIFIER_VERSION,
-      error: "role_classifier_not_configured"
+      error: "role_classifier_not_configured",
+      bindings: {
+        base_url: Boolean(baseUrl),
+        model: Boolean(model),
+        api_key: Boolean(apiKey)
+      }
     };
   }
 
