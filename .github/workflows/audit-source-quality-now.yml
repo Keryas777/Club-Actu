@@ -52,7 +52,7 @@ jobs:
           )
           suspicious_title = re.compile(
               r"^(?:accueil|football|classement|calendrier|résultats?|"
-              r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
+              r"toute l'actualité)(?:\s|$|[-:|])",
               re.I,
           )
 
@@ -135,7 +135,7 @@ jobs:
           )
           suspicious_title = re.compile(
               r"^(?:accueil|football|classement|calendrier|résultats?|"
-              r"toute l'actualité|actualités?)(?:\s|$|[-:|])",
+              r"toute l'actualité)(?:\s|$|[-:|])",
               re.I,
           )
 
