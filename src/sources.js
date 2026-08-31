@@ -44,6 +44,42 @@ export const SOURCE_ADAPTERS = {
     articlePath: /-\d{6,}\.html$/i,
     includePath: /\.html$/i
   }
+  sports_fr: {
+    id: "sports_fr",
+    discoveryMode: "rss",
+    discoveryUrl: "https://www.sports.fr/football/feed",
+    articleHosts: ["sports.fr", "www.sports.fr"]
+  },
+  topmercato: {
+    id: "topmercato",
+    discoveryMode: "rss",
+    discoveryUrl: "https://www.topmercato.com/feed",
+    articleHosts: ["topmercato.com", "www.topmercato.com"]
+  },
+  butfootballclub: {
+    id: "butfootballclub",
+    discoveryMode: "rss",
+    discoveryUrl: "https://www.butfootballclub.fr/feed",
+    articleHosts: ["butfootballclub.fr", "www.butfootballclub.fr"]
+  },
+  ferveur_lyonnaise: {
+    id: "ferveur_lyonnaise",
+    discoveryUrl: "https://www.ferveurlyonnaise.fr/",
+    articleHosts: ["ferveurlyonnaise.fr", "www.ferveurlyonnaise.fr"],
+    includePath: /\//i
+  },
+  madeingones: {
+    id: "madeingones",
+    discoveryUrl: "https://madeingones.ouest-france.fr/",
+    articleHosts: ["madeingones.ouest-france.fr"],
+    includePath: /\//i
+  },
+  sports_orange: {
+    id: "sports_orange",
+    discoveryUrl: "https://sports.orange.fr/football/",
+    articleHosts: ["sports.orange.fr"],
+    includePath: /\/football\//i
+  },
 };
 
 export function listEnabledAdapters() {
