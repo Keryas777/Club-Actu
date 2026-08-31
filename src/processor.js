@@ -879,6 +879,120 @@ export async function getRelevanceAudit(db, clubId = "ol", exampleLimit = 50, op
   };
 }
 
+export function previewV3Decision(decision, reasonCode) {
+  if (
+    decision === "relevant" &&
+    (reasonCode === "strong_alias_excerpt" || reasonCode === "strong_alias_lead")
+  ) {
+    return {
+      decision: "needs_review",
+      reason_code: reasonCode === "strong_alias_excerpt"
+        ? "strong_alias_excerpt_role_review"
+        : "strong_alias_lead_role_review"
+    };
+  }
+
+  return {
+    decision,
+    reason_code: reasonCode
+  };
+}
+
+export async function getRelevanceV3Preview(db, clubId = "ol", exampleLimit = 100) {
+  const counts = await db.prepare(
+    `SELECT
+       SUM(CASE WHEN a.decision = 'relevant' THEN 1 ELSE 0 END) AS current_relevant,
+       SUM(CASE WHEN a.decision = 'needs_review' THEN 1 ELSE 0 END) AS current_needs_review,
+       SUM(CASE WHEN a.decision = 'rejected' THEN 1 ELSE 0 END) AS current_rejected,
+       SUM(CASE WHEN a.decision = 'relevant' AND a.reason_code = 'strong_alias_excerpt' THEN 1 ELSE 0 END) AS excerpt_to_review,
+       SUM(CASE WHEN a.decision = 'relevant' AND a.reason_code = 'strong_alias_lead' THEN 1 ELSE 0 END) AS lead_to_review
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?`
+  ).bind(clubId, RULE_VERSION).first();
+
+  const currentRelevant = Number(counts?.current_relevant || 0);
+  const currentReview = Number(counts?.current_needs_review || 0);
+  const currentRejected = Number(counts?.current_rejected || 0);
+  const excerptToReview = Number(counts?.excerpt_to_review || 0);
+  const leadToReview = Number(counts?.lead_to_review || 0);
+  const movedToReview = excerptToReview + leadToReview;
+
+  const { results: examples } = await db.prepare(
+    `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+            a.decision, a.reason_code, a.reason_detail, a.decided_at,
+            e.normalized_title, e.normalized_excerpt, e.normalized_content
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     LEFT JOIN article_extractions e
+       ON e.article_id = r.id
+      AND e.source_content_hash = r.content_hash
+      AND e.extractor_version = ?
+      AND e.status = 'completed'
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?
+       AND a.decision = 'relevant'
+       AND a.reason_code IN ('strong_alias_excerpt', 'strong_alias_lead')
+     ORDER BY a.decided_at DESC
+     LIMIT ?`
+  ).bind(EXTRACTOR_VERSION, clubId, RULE_VERSION, exampleLimit).all();
+
+  return {
+    club_id: clubId,
+    current_rule_version: RULE_VERSION,
+    preview_rule_version: "phase-a-relevance-v3-preview",
+    policy: {
+      direct_club_source: "relevant",
+      strong_alias_title: "relevant",
+      strong_alias_excerpt: "needs_review",
+      strong_alias_lead: "needs_review",
+      body_and_weak_alias_rules: "unchanged"
+    },
+    current_counts: {
+      relevant: currentRelevant,
+      needs_review: currentReview,
+      rejected: currentRejected
+    },
+    preview_counts: {
+      relevant: Math.max(0, currentRelevant - movedToReview),
+      needs_review: currentReview + movedToReview,
+      rejected: currentRejected
+    },
+    moved_to_review: {
+      total: movedToReview,
+      strong_alias_excerpt: excerptToReview,
+      strong_alias_lead: leadToReview
+    },
+    changed_examples: (examples || []).map((example) => {
+      const enriched = enrichDiagnosticExample(example);
+      let detail = null;
+      try {
+        detail = enriched?.reason_detail ? JSON.parse(enriched.reason_detail) : null;
+      } catch {
+        detail = null;
+      }
+      const preview = previewV3Decision(enriched.decision, enriched.reason_code);
+      return {
+        id: enriched.id,
+        club_id: clubId,
+        source_id: enriched.source_id,
+        title: enriched.title,
+        url: enriched.url,
+        current_decision: enriched.decision,
+        current_reason_code: enriched.reason_code,
+        preview_decision: preview.decision,
+        preview_reason_code: preview.reason_code,
+        matched_alias: detail?.matched_alias || null,
+        matched_field: detail?.matched_field || null,
+        match_context: enriched.match_context || detail?.match_context || null
+      };
+    })
+  };
+}
+
 export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8, filters = {}) {
   const decisionFilter = filters.decision || null;
   const extractionStatusFilter = filters.extractionStatus || null;
