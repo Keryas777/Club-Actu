@@ -139,7 +139,7 @@ export async function classifyRoleWithProvider(env, input) {
     body: JSON.stringify({
       model,
       temperature: 0,
-      response_format: { type: "json_object" },
+      max_tokens: 180,
       messages: buildRoleClassifierPrompt(input)
     })
   });
