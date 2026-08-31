@@ -1,5 +1,5 @@
 import { collectAll, repairMojibake, normalizeStoredEntities } from "./collector.js";
-import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview, runRoleClassifierPreview } from "./processor.js";
+import { drainPhaseA, drainRoleClassifier, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview, runRoleClassifierPreview } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
 
 function json(data, init = {}) {
@@ -143,8 +143,13 @@ async function handleApi(request, env, url) {
       return json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const result = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
-    return json({ ok: true, trigger: "manual", ...result });
+    const deterministic = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
+    const roles = await drainRoleClassifier(env.DB, env, {
+      maxItems: 10,
+      maxDurationMs: 45000,
+      interRequestDelayMs: 4000
+    });
+    return json({ ok: true, trigger: "manual", deterministic, roles });
   }
 
   if (url.pathname === "/api/relevance-role-preview" && request.method === "POST") {
@@ -306,6 +311,11 @@ export default {
     ctx.waitUntil((async () => {
       await collectAll(env.DB);
       await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
+      await drainRoleClassifier(env.DB, env, {
+        maxItems: 10,
+        maxDurationMs: 45000,
+        interRequestDelayMs: 4000
+      });
     })());
   }
 };
