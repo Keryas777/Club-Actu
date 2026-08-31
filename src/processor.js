@@ -798,6 +798,63 @@ export async function drainPhaseA(db, options = {}) {
   };
 }
 
+export async function getRelevanceAudit(db, clubId = "ol", exampleLimit = 50) {
+  const { results: reasonCounts } = await db.prepare(
+    `SELECT a.reason_code, COUNT(*) AS count
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?
+       AND a.decision = 'relevant'
+       AND a.reason_code IN ('strong_alias_lead', 'strong_alias_excerpt')
+     GROUP BY a.reason_code
+     ORDER BY count DESC, a.reason_code ASC`
+  ).bind(clubId, RULE_VERSION).all();
+
+  const { results: sourceCounts } = await db.prepare(
+    `SELECT r.source_id, a.reason_code, COUNT(*) AS count
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?
+       AND a.decision = 'relevant'
+       AND a.reason_code IN ('strong_alias_lead', 'strong_alias_excerpt')
+     GROUP BY r.source_id, a.reason_code
+     ORDER BY count DESC, r.source_id ASC, a.reason_code ASC`
+  ).bind(clubId, RULE_VERSION).all();
+
+  const { results: examples } = await db.prepare(
+    `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+            a.decision, a.reason_code, a.reason_detail, a.decided_at,
+            e.normalized_title, e.normalized_excerpt, e.normalized_content
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     LEFT JOIN article_extractions e
+       ON e.article_id = r.id
+      AND e.source_content_hash = r.content_hash
+      AND e.extractor_version = ?
+      AND e.status = 'completed'
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?
+       AND a.decision = 'relevant'
+       AND a.reason_code IN ('strong_alias_lead', 'strong_alias_excerpt')
+     ORDER BY a.decided_at DESC
+     LIMIT ?`
+  ).bind(EXTRACTOR_VERSION, clubId, RULE_VERSION, exampleLimit).all();
+
+  return {
+    club_id: clubId,
+    relevance_rules: RULE_VERSION,
+    audited_reasons: ["strong_alias_lead", "strong_alias_excerpt"],
+    reason_counts: reasonCounts || [],
+    source_counts: sourceCounts || [],
+    examples: (examples || []).map(enrichDiagnosticExample)
+  };
+}
+
 export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit = 8, filters = {}) {
   const decisionFilter = filters.decision || null;
   const extractionStatusFilter = filters.extractionStatus || null;
