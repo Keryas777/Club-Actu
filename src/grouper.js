@@ -1,4 +1,4 @@
-const PREVIEW_VERSION = "phase-b-preview-v2";
+const PREVIEW_VERSION = "phase-b-preview-v2.1";
 const DEFAULT_WINDOW_HOURS = 48;
 
 const STOPWORDS = new Set([
@@ -70,9 +70,17 @@ function articleTokens(article, ignored) {
   };
 }
 
-function entityLikeTokens(tokens = []) {
-  // Rare/specific tokens are useful proxies for named entities at this cheap candidate stage.
-  return tokens.filter((token) => token.length >= 4 && !/^\\d+$/.test(token));
+function salientTokens(tokens = [], weights = new Map(), corpusSize = 0) {
+  // Candidate gating needs discriminating terms, not merely long words.
+  // On a normal preview corpus, IDF-like weights suppress vocabulary repeated everywhere.
+  // Tiny unit-test/sparse corpora cannot estimate rarity meaningfully, so rely on the
+  // already-cleaned token set there; the candidate rules still require >=2 shared terms.
+  const tinyCorpus = corpusSize <= 4;
+  return tokens.filter((token) =>
+    token.length >= 4 &&
+    !/^\\d+$/.test(token) &&
+    (tinyCorpus || (weights.get(token) || 1) >= 1.35)
+  );
 }
 
 function intersection(a, b) {
@@ -116,38 +124,56 @@ function timeDistanceHours(a, b) {
   return Math.abs(ta - tb) / 3600000;
 }
 
-function classifyPair(score, sharedTitle, sharedContext, hours) {
+function classifyPair(score, sharedTitle, sharedContext, sharedSalient, hours) {
   if (hours != null && hours > DEFAULT_WINDOW_HOURS) return "none";
+
+  // Keep the v2 strong criteria unchanged.
   if (
     (score >= 0.62 && sharedContext.length >= 2) ||
     (score >= 0.54 && sharedTitle.length >= 2) ||
     (score >= 0.48 && sharedTitle.length >= 1 && sharedContext.length >= 3)
   ) return "strong";
+
+  // A candidate must now carry a discriminating common core.
+  // One shared player name alone is intentionally insufficient.
   if (
-    (score >= 0.38 && sharedContext.length >= 2) ||
-    (score >= 0.32 && sharedTitle.length >= 2) ||
+    (
+      score >= 0.38 &&
+      sharedSalient.length >= 2
+    ) ||
+    (
+      sharedTitle.length >= 2 &&
+      sharedSalient.length >= 2 &&
+      score >= 0.26
+    ) ||
     (
       sharedTitle.length >= 1 &&
+      sharedSalient.length >= 2 &&
       sharedContext.length >= 3 &&
       (hours == null || hours <= 12)
     ) ||
     (
-      sharedContext.filter((token) => token.length >= 4).length >= 2 &&
+      sharedSalient.length >= 3 &&
+      sharedContext.length >= 4 &&
       (hours == null || hours <= 12)
     )
-  ) return "possible";
+  ) return "candidate";
+
   return "none";
 }
 
-export function scoreArticlePair(a, b, tokenA, tokenB, weights) {
+export function scoreArticlePair(a, b, tokenA, tokenB, weights, corpusSize = 0) {
   const titleScore = weightedJaccard(tokenA.title, tokenB.title, weights);
   const contextScore = weightedJaccard(tokenA.context, tokenB.context, weights);
   const score = 0.6 * titleScore + 0.4 * contextScore;
   const sharedTitle = intersection(tokenA.title, tokenB.title);
   const sharedContext = intersection(tokenA.context, tokenB.context);
   const hours = timeDistanceHours(a, b);
-  const sharedEntities = intersection(entityLikeTokens(tokenA.context), entityLikeTokens(tokenB.context));
-  const entityBonus = Math.min(0.24, sharedEntities.length * 0.08);
+  const sharedSalient = intersection(
+    salientTokens(tokenA.context, weights, corpusSize),
+    salientTokens(tokenB.context, weights, corpusSize)
+  );
+  const entityBonus = Math.min(0.24, sharedSalient.length * 0.08);
   const entityScore = Math.min(1, score + entityBonus);
   return {
     score: entityScore,
@@ -155,9 +181,9 @@ export function scoreArticlePair(a, b, tokenA, tokenB, weights) {
     context_score: contextScore,
     shared_title_tokens: sharedTitle,
     shared_context_tokens: sharedContext,
-    shared_entity_tokens: sharedEntities,
+    shared_entity_tokens: sharedSalient,
     hours_apart: hours,
-    confidence: classifyPair(entityScore, sharedTitle, sharedContext, hours)
+    confidence: classifyPair(entityScore, sharedTitle, sharedContext, sharedSalient, hours)
   };
 }
 
@@ -170,7 +196,7 @@ export function buildPreviewPairs(articles, aliases = [], maxPairs = 30) {
   for (let i = 0; i < articles.length; i++) {
     for (let j = i + 1; j < articles.length; j++) {
       const scored = scoreArticlePair(
-        articles[i], articles[j], tokenized[i], tokenized[j], weights
+        articles[i], articles[j], tokenized[i], tokenized[j], weights, articles.length
       );
       if (scored.confidence === "none") continue;
       pairs.push({
@@ -248,7 +274,7 @@ export async function getPhaseBPreview(db, clubId = "ol", articleLimit = 60, pai
     article_count: (articles || []).length,
     pair_count: pairs.length,
     strong_count: pairs.filter((p) => p.confidence === "strong").length,
-    possible_count: pairs.filter((p) => p.confidence === "possible").length,
+    candidate_count: pairs.filter((p) => p.confidence === "candidate").length,
     window_hours: DEFAULT_WINDOW_HOURS,
     pairs
   };
