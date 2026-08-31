@@ -265,3 +265,37 @@ test("weak aliases mentioned only deep in body do not create review noise", () =
   });
   assertDecision(result, "rejected", "club_not_relevant");
 });
+
+
+test("reason detail exposes the triggering excerpt context", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "PSG", strength: "strong" }],
+    title: "Stade Rennais : une nouvelle piste au mercato",
+    excerpt: "Après leur rencontre face au PSG, les Rennais ont repris les discussions avec plusieurs clubs.",
+    content: ""
+  });
+
+  assertDecision(result, "relevant", "strong_alias_excerpt");
+  const detail = JSON.parse(result.reason_detail);
+  assert.equal(detail.matched_alias, "PSG");
+  assert.equal(detail.matched_field, "excerpt");
+  assert.match(detail.match_context, /rencontre face au PSG/i);
+  assert.match(detail.match_context, /Rennais/i);
+});
+
+test("reason detail exposes context for a deep body-only mention", () => {
+  const prefix = "Le dossier concerne uniquement le Stade Rennais et son mercato. ".repeat(20);
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "PSG", strength: "strong" }],
+    title: "Stade Rennais : le mercato continue",
+    excerpt: "Plusieurs mouvements sont encore envisagés.",
+    content: prefix + "Après un rappel de la rencontre face au PSG, le sujet revient immédiatement au recrutement rennais."
+  });
+
+  assertDecision(result, "needs_review", "strong_alias_body_only");
+  const detail = JSON.parse(result.reason_detail);
+  assert.equal(detail.matched_field, "body");
+  assert.match(detail.match_context, /rencontre face au PSG/i);
+});
