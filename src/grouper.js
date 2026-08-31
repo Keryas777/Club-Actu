@@ -12,6 +12,7 @@ const STOPWORDS = new Set([
   "football","foot","ligue","championnat","match","club","equipe","equipe","joueur","joueurs",
   "mercato","transfert","transferts","actualite","direct","officiel","officielle","france","sport",
   "info","infos","news","dossier","dossiers","fermeture","marche","ete","hiver","avant","apres",
+  "defenseur","milieu","attaquant","gardien","avance","anime","cible","ciblee","cibles",
   "million","millions","euros","euro","saison","journee","j","c1","c3"
 ]);
 
@@ -128,6 +129,10 @@ function classifyPair(score, sharedTitle, sharedContext, hours) {
     (
       sharedTitle.length >= 1 &&
       sharedContext.length >= 3 &&
+      (hours == null || hours <= 12)
+    ) ||
+    (
+      sharedContext.filter((token) => token.length >= 4).length >= 2 &&
       (hours == null || hours <= 12)
     )
   ) return "possible";
