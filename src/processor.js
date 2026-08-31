@@ -1057,31 +1057,26 @@ export async function runRoleClassifierPreview(db, env, clubId = "ol", exampleLi
   });
 
   const classified = [];
-  const concurrency = 3;
-  for (let start = 0; start < inputs.length; start += concurrency) {
-    const chunk = inputs.slice(start, start + concurrency);
-    const chunkResults = await Promise.all(chunk.map(async ({ row, input }) => {
-      const classification = await classifyRoleWithProvider(env, input);
-      const preview = classification.error
-        ? { decision: "needs_review", reason_code: "role_classifier_error" }
-        : rolePreviewDecision(classification);
+  for (const { row, input } of inputs) {
+    const classification = await classifyRoleWithProvider(env, input);
+    const preview = classification.error
+      ? { decision: "needs_review", reason_code: "role_classifier_error" }
+      : rolePreviewDecision(classification);
 
-      return {
-        id: row.id,
-        club_id: clubId,
-        source_id: row.source_id,
-        title: row.title,
-        url: row.url,
-        current_reason_code: row.reason_code,
-        matched_alias: input.matched_alias,
-        matched_field: input.matched_field,
-        match_context: input.match_context,
-        classification,
-        preview_decision: preview.decision,
-        preview_reason_code: preview.reason_code
-      };
-    }));
-    classified.push(...chunkResults);
+    classified.push({
+      id: row.id,
+      club_id: clubId,
+      source_id: row.source_id,
+      title: row.title,
+      url: row.url,
+      current_reason_code: row.reason_code,
+      matched_alias: input.matched_alias,
+      matched_field: input.matched_field,
+      match_context: input.match_context,
+      classification,
+      preview_decision: preview.decision,
+      preview_reason_code: preview.reason_code
+    });
   }
 
   const summary = {
