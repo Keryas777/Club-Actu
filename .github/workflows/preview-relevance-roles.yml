@@ -1,0 +1,54 @@
+name: Preview relevance roles
+
+on:
+  workflow_dispatch:
+    inputs:
+      club:
+        description: Club id
+        required: true
+        default: psg
+        type: choice
+        options:
+          - psg
+          - om
+          - ol
+      limit:
+        description: Maximum ambiguous articles to classify
+        required: true
+        default: "20"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relevance-role-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run protected role-classifier preview
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          CLUB: ${{ inputs.club }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          case "$LIMIT" in
+            ''|*[!0-9]*)
+              echo "limit must be an integer"
+              exit 1
+              ;;
+          esac
+
+          response="$(
+            curl --fail-with-body --silent --show-error               --request POST               --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN"               --header "Accept: application/json"               "https://club-actu.deliriousfan7.workers.dev/api/relevance-role-preview?club=$CLUB&limit=$LIMIT"
+          )"
+
+          printf '%s
+' "$response" | python3 -m json.tool

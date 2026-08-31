@@ -1,5 +1,5 @@
 import { collectAll, repairMojibake, normalizeStoredEntities } from "./collector.js";
-import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview } from "./processor.js";
+import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview, runRoleClassifierPreview } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
 
 function json(data, init = {}) {
@@ -145,6 +145,22 @@ async function handleApi(request, env, url) {
 
     const result = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
     return json({ ok: true, trigger: "manual", ...result });
+  }
+
+  if (url.pathname === "/api/relevance-role-preview" && request.method === "POST") {
+    if (!env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+    }
+
+    const token = bearerToken(request);
+    if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const club = (url.searchParams.get("club") || "ol").trim() || "ol";
+    const limit = parseLimit(url, 20, 50);
+    const preview = await runRoleClassifierPreview(env.DB, env, club, limit);
+    return json({ ok: true, ...preview });
   }
 
   if (url.pathname === "/api/relevance-v3-preview" && request.method === "GET") {

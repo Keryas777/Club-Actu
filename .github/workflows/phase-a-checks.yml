@@ -23,6 +23,7 @@ jobs:
           node --check src/index.js
           node --check src/sources.js
           node --check src/grouper.js
+          node --check src/relevance-role.js
 
       - name: Run unit tests
         run: npm test

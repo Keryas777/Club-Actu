@@ -1,3 +1,5 @@
+import { classifyRoleWithProvider, rolePreviewDecision, ROLE_CLASSIFIER_VERSION } from "./relevance-role.js";
+
 const USER_AGENT = "ClubActuBot/0.2 (+https://github.com/Keryas777/Club-Actu)";
 const EXTRACTOR_VERSION = "phase-a-extractor-v1";
 const RULE_VERSION = "phase-a-relevance-v2";
@@ -990,6 +992,117 @@ export async function getRelevanceV3Preview(db, clubId = "ol", exampleLimit = 10
         match_context: enriched.match_context || detail?.match_context || null
       };
     })
+  };
+}
+
+export async function runRoleClassifierPreview(db, env, clubId = "ol", exampleLimit = 20) {
+  const club = await db.prepare(
+    `SELECT id, name FROM clubs WHERE id = ? AND active = 1 LIMIT 1`
+  ).bind(clubId).first();
+
+  if (!club) {
+    return {
+      club_id: clubId,
+      classifier_version: ROLE_CLASSIFIER_VERSION,
+      error: "unknown_club",
+      count: 0,
+      results: []
+    };
+  }
+
+  const aliases = await getAliases(db, clubId);
+
+  const { results: rows } = await db.prepare(
+    `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
+            a.reason_code, a.reason_detail,
+            e.normalized_title, e.normalized_excerpt, e.normalized_content
+     FROM article_club_assessments a
+     JOIN raw_articles r ON r.id = a.article_id
+     LEFT JOIN article_extractions e
+       ON e.article_id = r.id
+      AND e.source_content_hash = r.content_hash
+      AND e.extractor_version = ?
+      AND e.status = 'completed'
+     WHERE a.club_id = ?
+       AND a.source_content_hash = r.content_hash
+       AND a.rule_version = ?
+       AND a.decision = 'relevant'
+       AND a.reason_code IN ('strong_alias_excerpt', 'strong_alias_lead')
+     ORDER BY a.decided_at DESC
+     LIMIT ?`
+  ).bind(EXTRACTOR_VERSION, clubId, RULE_VERSION, exampleLimit).all();
+
+  const inputs = (rows || []).map((row) => {
+    let detail = null;
+    try {
+      detail = row.reason_detail ? JSON.parse(row.reason_detail) : null;
+    } catch {
+      detail = null;
+    }
+
+    return {
+      row,
+      input: {
+        club_id: clubId,
+        club_name: club.name,
+        aliases: aliases.map((entry) => entry.alias),
+        title: row.normalized_title || row.title || "",
+        excerpt: row.normalized_excerpt || "",
+        lead: compactSpace(row.normalized_content || "").slice(0, 900),
+        matched_alias: detail?.matched_alias || null,
+        matched_field: detail?.matched_field || null,
+        match_context: detail?.match_context || null
+      }
+    };
+  });
+
+  const classified = [];
+  const concurrency = 3;
+  for (let start = 0; start < inputs.length; start += concurrency) {
+    const chunk = inputs.slice(start, start + concurrency);
+    const chunkResults = await Promise.all(chunk.map(async ({ row, input }) => {
+      const classification = await classifyRoleWithProvider(env, input);
+      const preview = classification.error
+        ? { decision: "needs_review", reason_code: "role_classifier_error" }
+        : rolePreviewDecision(classification);
+
+      return {
+        id: row.id,
+        club_id: clubId,
+        source_id: row.source_id,
+        title: row.title,
+        url: row.url,
+        current_reason_code: row.reason_code,
+        matched_alias: input.matched_alias,
+        matched_field: input.matched_field,
+        match_context: input.match_context,
+        classification,
+        preview_decision: preview.decision,
+        preview_reason_code: preview.reason_code
+      };
+    }));
+    classified.push(...chunkResults);
+  }
+
+  const summary = {
+    relevant: classified.filter((item) => item.preview_decision === "relevant").length,
+    rejected: classified.filter((item) => item.preview_decision === "rejected").length,
+    needs_review: classified.filter((item) => item.preview_decision === "needs_review").length,
+    errors: classified.filter((item) => item.classification?.error).length
+  };
+
+  return {
+    club_id: clubId,
+    club_name: club.name,
+    classifier_version: ROLE_CLASSIFIER_VERSION,
+    configured: Boolean(
+      env.ROLE_CLASSIFIER_BASE_URL &&
+      env.ROLE_CLASSIFIER_MODEL &&
+      env.ROLE_CLASSIFIER_API_KEY
+    ),
+    count: classified.length,
+    summary,
+    results: classified
   };
 }
 
