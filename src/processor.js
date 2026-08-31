@@ -200,7 +200,7 @@ export function assessClubRelevance({ relationType, aliases, title, excerpt, con
     };
   }
 
-  const leadWeak = weak.find((item) => item.lead > 0);
+  const leadWeak = weak.find((item) => item.lead > 0 && item.body_after_lead === 0);
   if (leadWeak) {
     return {
       decision: "needs_review",
