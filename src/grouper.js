@@ -257,7 +257,7 @@ export async function getPhaseBPreview(db, clubId = "ol", articleLimit = 60, pai
      WHERE a.club_id = ?
        AND a.decision = 'relevant'
        AND a.source_content_hash = r.content_hash
-       AND a.rule_version = 'phase-a-relevance-v2'
+       AND a.rule_version = 'phase-a-relevance-v3'
      ORDER BY COALESCE(e.normalized_published_at, r.published_at, r.last_seen_at) DESC
      LIMIT ?`
   ).bind(clubId, articleLimit).all();
