@@ -1057,7 +1057,7 @@ export async function runRoleClassifierPreview(db, env, clubId = "ol", exampleLi
   });
 
   const classified = [];
-  const interRequestDelayMs = 2000;
+  const interRequestDelayMs = 4000;
 
   for (let index = 0; index < inputs.length; index += 1) {
     const { row, input } = inputs[index];
