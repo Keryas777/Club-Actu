@@ -95,23 +95,29 @@ async function sha256Hex(text) {
     .join("");
 }
 
-async function fetchText(url, timeoutMs = 12000) {
+async function fetchWithTimeout(url, init = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    return await fetch(url, {
+      ...init,
       signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
-      }
+      redirect: init.redirect || "follow"
     });
-    const text = await res.text();
-    return { ok: res.ok, status: res.status, text, finalUrl: res.url };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchText(url, timeoutMs = 12000) {
+  const res = await fetchWithTimeout(url, {
+    headers: {
+      "User-Agent": USER_AGENT,
+      Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
+    }
+  }, timeoutMs);
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, text, finalUrl: res.url };
 }
 
 function looksLikeArticleUrl(url, adapter) {
@@ -143,8 +149,7 @@ function looksLikeArticleTitle(title = "") {
 }
 
 async function discoverOlApi(adapter) {
-  const configRes = await fetch(adapter.configUrl, {
-    redirect: "follow",
+  const configRes = await fetchWithTimeout(adapter.configUrl, {
     headers: { "User-Agent": USER_AGENT, Accept: "application/json,text/plain,*/*" }
   });
   if (!configRes.ok) throw new Error(`OL config HTTP ${configRes.status}`);
@@ -158,7 +163,7 @@ async function discoverOlApi(adapter) {
   const pageSize = Math.max(1, Math.min(100, Number(adapter.pageSize || 25)));
   const locale = encodeURIComponent(adapter.locale || "fr");
   const endpoint = `${apiUrl}/articles?sort=publish_date:desc&pagination[pageSize]=${pageSize}&locale=${locale}`;
-  const res = await fetch(endpoint, { redirect: "follow", headers });
+  const res = await fetchWithTimeout(endpoint, { headers });
   if (!res.ok) throw new Error(`OL articles HTTP ${res.status}`);
   const payload = await res.json();
   const rows = Array.isArray(payload && payload.data) ? payload.data : [];
@@ -244,55 +249,134 @@ function discoverLinks(html, adapter) {
   return [...found.values()];
 }
 
-async function upsertArticle(db, sourceId, item, now) {
-  const normalizedTitle = repairMojibake(item.title || "");
-  const normalizedExcerpt = repairMojibake(item.excerpt || "");
-  const publishedAt = item.publishedAt || null;
-  const discoveryMethod = item.discoveryMethod || "html_links";
-  const id = await sha256Hex(sourceId + "|" + item.url);
-  const contentHash = await sha256Hex([normalizedTitle, normalizedExcerpt, publishedAt || ""].join("|") || item.url);
+async function upsertArticles(db, sourceId, items, now) {
+  if (!items.length) return { inserted: 0, updated: 0 };
 
-  const existing = await db.prepare(
-    "SELECT id, content_hash FROM raw_articles WHERE source_id = ? AND canonical_url = ?"
-  ).bind(sourceId, item.url).first();
+  const prepared = await Promise.all(items.map(async (item) => {
+    const normalizedTitle = repairMojibake(item.title || "");
+    const normalizedExcerpt = repairMojibake(item.excerpt || "");
+    const publishedAt = item.publishedAt || null;
+    const discoveryMethod = item.discoveryMethod || "html_links";
+    const id = await sha256Hex(sourceId + "|" + item.url);
+    const contentHash = await sha256Hex(
+      [normalizedTitle, normalizedExcerpt, publishedAt || ""].join("|") || item.url
+    );
+    return {
+      ...item,
+      id,
+      normalizedTitle,
+      normalizedExcerpt,
+      publishedAt,
+      discoveryMethod,
+      contentHash
+    };
+  }));
 
-  if (!existing) {
-    await db.prepare(
-      `INSERT INTO raw_articles
-      (id, source_id, url, canonical_url, title, published_at, excerpt,
-       content_level, discovery_method, first_seen_at, last_seen_at,
-       content_hash, processing_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'metadata', ?, ?, ?, ?, 'raw')`
-    ).bind(
-      id, sourceId, item.url, item.url, normalizedTitle, publishedAt,
-      normalizedExcerpt || null, discoveryMethod, now, now, contentHash
-    ).run();
+  const placeholders = prepared.map(() => "?").join(",");
+  const { results: existingRows } = await db.prepare(
+    `SELECT id, canonical_url, content_hash
+     FROM raw_articles
+     WHERE source_id = ? AND canonical_url IN (${placeholders})`
+  ).bind(sourceId, ...prepared.map((item) => item.url)).all();
 
-    await db.prepare(
-      `INSERT OR IGNORE INTO article_versions
-       (article_id, content_hash, title, excerpt, captured_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).bind(id, contentHash, normalizedTitle, normalizedExcerpt || null, now).run();
+  const existingByUrl = new Map(
+    (existingRows || []).map((row) => [row.canonical_url, row])
+  );
 
-    return "inserted";
+  let inserted = 0;
+  let updated = 0;
+  const statements = [];
+
+  for (const item of prepared) {
+    const existing = existingByUrl.get(item.url);
+
+    if (!existing) {
+      inserted++;
+      statements.push(
+        db.prepare(
+          `INSERT INTO raw_articles
+          (id, source_id, url, canonical_url, title, published_at, excerpt,
+           content_level, discovery_method, first_seen_at, last_seen_at,
+           content_hash, processing_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'metadata', ?, ?, ?, ?, 'raw')`
+        ).bind(
+          item.id, sourceId, item.url, item.url, item.normalizedTitle,
+          item.publishedAt, item.normalizedExcerpt || null, item.discoveryMethod,
+          now, now, item.contentHash
+        ),
+        db.prepare(
+          `INSERT OR IGNORE INTO article_versions
+           (article_id, content_hash, title, excerpt, captured_at)
+           VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          item.id, item.contentHash, item.normalizedTitle,
+          item.normalizedExcerpt || null, now
+        )
+      );
+      continue;
+    }
+
+    updated++;
+    statements.push(
+      db.prepare(
+        `UPDATE raw_articles SET
+           last_seen_at = ?, title = ?, published_at = COALESCE(?, published_at),
+           excerpt = COALESCE(?, excerpt), discovery_method = ?, content_hash = ?
+         WHERE id = ?`
+      ).bind(
+        now, item.normalizedTitle, item.publishedAt,
+        item.normalizedExcerpt || null, item.discoveryMethod,
+        item.contentHash, existing.id
+      )
+    );
+
+    if (existing.content_hash !== item.contentHash) {
+      statements.push(
+        db.prepare(
+          `INSERT OR IGNORE INTO article_versions
+           (article_id, content_hash, title, excerpt, captured_at)
+           VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          existing.id, item.contentHash, item.normalizedTitle,
+          item.normalizedExcerpt || null, now
+        )
+      );
+    }
   }
+
+  // Keep each D1 batch modest. This removes hundreds of serial round-trips
+  // while avoiding one oversized batch when many sources are active.
+  for (let i = 0; i < statements.length; i += 50) {
+    await db.batch(statements.slice(i, i + 50));
+  }
+
+  return { inserted, updated };
+}
+
+async function checkpointRun(db, runId, counters, details, finishedAt = null) {
+  const status = finishedAt
+    ? (counters.errors === counters.attempted
+      ? "failed"
+      : (counters.errors ? "partial" : "success"))
+    : "running";
 
   await db.prepare(
-    `UPDATE raw_articles SET
-       last_seen_at = ?, title = ?, published_at = COALESCE(?, published_at),
-       excerpt = COALESCE(?, excerpt), discovery_method = ?, content_hash = ?
+    `UPDATE collection_runs SET
+      finished_at = ?, status = ?, sources_succeeded = ?,
+      articles_discovered = ?, articles_inserted = ?,
+      articles_updated = ?, error_count = ?, notes = ?
      WHERE id = ?`
-  ).bind(now, normalizedTitle, publishedAt, normalizedExcerpt || null, discoveryMethod, contentHash, existing.id).run();
-
-  if (existing.content_hash !== contentHash) {
-    await db.prepare(
-      `INSERT OR IGNORE INTO article_versions
-       (article_id, content_hash, title, excerpt, captured_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).bind(existing.id, contentHash, normalizedTitle, normalizedExcerpt || null, now).run();
-  }
-
-  return "updated";
+  ).bind(
+    finishedAt,
+    status,
+    counters.success,
+    counters.discovered,
+    counters.inserted,
+    counters.updated,
+    counters.errors,
+    JSON.stringify(details),
+    runId
+  ).run();
 }
 
 export async function collectAll(db) {
@@ -318,7 +402,14 @@ export async function collectAll(db) {
   const runId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   const adapters = listEnabledAdapters();
-  let success = 0, discovered = 0, inserted = 0, updated = 0, errors = 0;
+  const counters = {
+    attempted: adapters.length,
+    success: 0,
+    discovered: 0,
+    inserted: 0,
+    updated: 0,
+    errors: 0
+  };
   const details = [];
 
   await db.prepare(
@@ -328,6 +419,8 @@ export async function collectAll(db) {
   ).bind(runId, startedAt, adapters.length).run();
 
   for (const adapter of adapters) {
+    const sourceStartedAt = Date.now();
+
     try {
       let links;
       if (adapter.discoveryMode === "ol_api") {
@@ -335,62 +428,56 @@ export async function collectAll(db) {
       } else {
         const page = await fetchText(adapter.discoveryUrl);
         if (!page.ok) throw new Error(`HTTP ${page.status}`);
-        links = adapter.discoveryMode === "rss" ? discoverRss(page.text, adapter) : discoverLinks(page.text, adapter);
+        links = adapter.discoveryMode === "rss"
+          ? discoverRss(page.text, adapter)
+          : discoverLinks(page.text, adapter);
       }
-      discovered += links.length;
-      let sourceInserted = 0, sourceUpdated = 0;
-      for (const item of links) {
-        const action = await upsertArticle(db, adapter.id, item, startedAt);
-        if (action === "inserted") { inserted++; sourceInserted++; }
-        else { updated++; sourceUpdated++; }
-      }
-      success++;
+
+      const sourceResult = await upsertArticles(db, adapter.id, links, startedAt);
+      counters.discovered += links.length;
+      counters.inserted += sourceResult.inserted;
+      counters.updated += sourceResult.updated;
+      counters.success++;
+
       details.push({
         source: adapter.id,
         ok: true,
         discovered: links.length,
-        inserted: sourceInserted,
-        updated: sourceUpdated
+        inserted: sourceResult.inserted,
+        updated: sourceResult.updated,
+        duration_ms: Date.now() - sourceStartedAt
       });
     } catch (error) {
-      errors++;
+      counters.errors++;
       details.push({
         source: adapter.id,
         ok: false,
-        error: String(error?.message || error)
+        error: String(error?.name === "AbortError"
+          ? "fetch timeout"
+          : (error?.message || error)),
+        duration_ms: Date.now() - sourceStartedAt
       });
     }
+
+    // Persist progress after every source. If Cloudflare interrupts the Worker,
+    // the audit still shows exactly how far the run got instead of 0/13.
+    await checkpointRun(db, runId, counters, details);
   }
 
   const finishedAt = new Date().toISOString();
-  await db.prepare(
-    `UPDATE collection_runs SET
-      finished_at = ?, status = ?, sources_succeeded = ?,
-      articles_discovered = ?, articles_inserted = ?,
-      articles_updated = ?, error_count = ?, notes = ?
-     WHERE id = ?`
-  ).bind(
-    finishedAt,
-    errors === adapters.length ? "failed" : (errors ? "partial" : "success"),
-    success,
-    discovered,
-    inserted,
-    updated,
-    errors,
-    JSON.stringify(details),
-    runId
-  ).run();
+  await checkpointRun(db, runId, counters, details, finishedAt);
 
   return {
     run_id: runId,
     started_at: startedAt,
     finished_at: finishedAt,
-    sources_attempted: adapters.length,
-    sources_succeeded: success,
-    articles_discovered: discovered,
-    articles_inserted: inserted,
-    articles_updated: updated,
-    errors,
+    sources_attempted: counters.attempted,
+    sources_succeeded: counters.success,
+    articles_discovered: counters.discovered,
+    articles_inserted: counters.inserted,
+    articles_updated: counters.updated,
+    errors: counters.errors,
     details
   };
 }
+
