@@ -64,3 +64,24 @@ test("low confidence remains reviewable", () => {
     { decision: "needs_review", reason_code: "role_classifier_low_confidence" }
   );
 });
+
+
+test("role classifier prompt only sends the matched text field", () => {
+  const messages = buildRoleClassifierPrompt({
+    club_id: "psg",
+    club_name: "Paris Saint-Germain",
+    aliases: ["PSG"],
+    title: "Rennes prépare son mercato",
+    excerpt: "Après son match contre le PSG, Rennes prépare la suite.",
+    lead: "This lead should not be sent when excerpt triggered.",
+    matched_alias: "PSG",
+    matched_field: "excerpt",
+    match_context: "Après son match contre le PSG, Rennes prépare la suite."
+  });
+
+  const payload = JSON.parse(messages[1].content);
+  assert.equal(payload.matched_field, "excerpt");
+  assert.match(payload.matched_text, /match contre le PSG/);
+  assert.equal(Object.hasOwn(payload, "excerpt"), false);
+  assert.equal(Object.hasOwn(payload, "lead"), false);
+});
