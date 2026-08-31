@@ -1166,13 +1166,14 @@ export async function drainRoleClassifier(db, env, options = {}) {
       match_context: detail?.match_context || null
     };
 
-    lastRequestAt = Date.now();
     const classification = await classifyRoleWithProvider(env, input);
+    lastRequestAt = Date.now();
     await saveRoleClassification(db, row, classification);
 
     if (classification.error) {
       totals.errors++;
       totals.needs_review++;
+      await refreshArticleProcessingStatus(db, row.article_id, row.source_content_hash);
       if (examples.length < 8) {
         examples.push({
           article_id: row.article_id,
