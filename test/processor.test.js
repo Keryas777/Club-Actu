@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { assessClubRelevance, classifyTechnicalArticle } from "../src/processor.js";
 
+function assertDecision(actual, decision, reasonCode) {
+  assert.equal(actual.decision, decision);
+  assert.equal(actual.reason_code, reasonCode);
+}
+
 const strongAliases = [
   { alias: "Olympique Lyonnais", strength: "strong" },
   { alias: "OL", strength: "strong" },
@@ -9,7 +14,7 @@ const strongAliases = [
 ];
 
 test("direct club sources are relevant without alias matching", () => {
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "direct",
       aliases: strongAliases,
@@ -17,25 +22,25 @@ test("direct club sources are relevant without alias matching", () => {
       excerpt: "Une actualité publiée directement par le club.",
       content: ""
     }),
-    { decision: "relevant", reason_code: "direct_club_source" }
+    "relevant",
+    "direct_club_source"
   );
 });
 
 test("strong alias makes a national-source article relevant", () => {
-  assert.deepEqual(
-    assessClubRelevance({
-      relationType: "relevant",
-      aliases: strongAliases,
-      title: "Mercato : l'OL avance sur un défenseur",
-      excerpt: "",
-      content: ""
-    }),
-    { decision: "relevant", reason_code: "strong_club_alias" }
-  );
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: strongAliases,
+    title: "Mercato : l'OL avance sur un défenseur",
+    excerpt: "",
+    content: ""
+  });
+  assertDecision(result, "relevant", "strong_alias_title");
+  assert.match(result.reason_detail, /"matched_field":"title"/);
 });
 
 test("weak alias stays reviewable rather than forced relevant", () => {
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "relevant",
       aliases: strongAliases,
@@ -43,12 +48,13 @@ test("weak alias stays reviewable rather than forced relevant", () => {
       excerpt: "",
       content: ""
     }),
-    { decision: "needs_review", reason_code: "weak_club_alias" }
+    "needs_review",
+    "weak_alias_title"
   );
 });
 
 test("unrelated national article is rejected for the club", () => {
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "relevant",
       aliases: strongAliases,
@@ -56,7 +62,8 @@ test("unrelated national article is rejected for the club", () => {
       excerpt: "Les joueurs phocéens se sont entraînés ce matin.",
       content: ""
     }),
-    { decision: "rejected", reason_code: "club_not_relevant" }
+    "rejected",
+    "club_not_relevant"
   );
 });
 
@@ -155,7 +162,7 @@ test("PSG aliases do not treat generic Paris as relevant", () => {
     { alias: "PSG", strength: "strong" }
   ];
 
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "relevant",
       aliases,
@@ -163,10 +170,11 @@ test("PSG aliases do not treat generic Paris as relevant", () => {
       excerpt: "",
       content: ""
     }),
-    { decision: "rejected", reason_code: "club_not_relevant" }
+    "rejected",
+    "club_not_relevant"
   );
 
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "relevant",
       aliases,
@@ -174,7 +182,8 @@ test("PSG aliases do not treat generic Paris as relevant", () => {
       excerpt: "",
       content: ""
     }),
-    { decision: "relevant", reason_code: "strong_club_alias" }
+    "relevant",
+    "strong_alias_title"
   );
 });
 
@@ -186,7 +195,7 @@ test("OM aliases recognize Marseille without OL-specific assumptions", () => {
     { alias: "Marseille", strength: "strong" }
   ];
 
-  assert.deepEqual(
+  assertDecision(
     assessClubRelevance({
       relationType: "relevant",
       aliases,
@@ -194,6 +203,65 @@ test("OM aliases recognize Marseille without OL-specific assumptions", () => {
       excerpt: "",
       content: ""
     }),
-    { decision: "relevant", reason_code: "strong_club_alias" }
+    "relevant",
+    "strong_alias_title"
   );
+});
+
+
+test("clickbait title can still be relevant when the club is central in the excerpt", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "PSG", strength: "strong" }],
+    title: "Coup de tonnerre, il a pris sa décision !",
+    excerpt: "Le PSG a reçu la réponse du joueur ce dimanche.",
+    content: ""
+  });
+  assertDecision(result, "relevant", "strong_alias_excerpt");
+});
+
+test("clickbait title can still be relevant when the club appears immediately in the article lead", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "OM", strength: "strong" }],
+    title: "C'est terminé, le verdict est tombé",
+    excerpt: "",
+    content: "L'OM a décidé de mettre fin aux discussions avec le joueur. Les dirigeants marseillais veulent avancer rapidement."
+  });
+  assertDecision(result, "relevant", "strong_alias_lead");
+});
+
+test("a club mentioned only deep in the body is not auto-promoted to relevant", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "PSG", strength: "strong" }],
+    title: "Stade Rennais : du gros monde sur Estéban Lepaul",
+    excerpt: "Plusieurs clubs suivent l'attaquant rennais.",
+    content: ("Le dossier concerne avant tout Rennes et plusieurs clubs étrangers. ".repeat(20)) +
+      "Le PSG a également été cité parmi les équipes attentives."
+  });
+  assertDecision(result, "needs_review", "strong_alias_body_only");
+});
+
+test("repeated body-only mentions remain reviewable instead of automatically relevant", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "OM", strength: "strong" }],
+    title: "La Premier League pose un gros chèque à l'OL !",
+    excerpt: "Lyon pourrait recevoir une offre importante.",
+    content: ("Le dossier lyonnais occupe l'essentiel de l'article. ".repeat(20)) +
+      "L'OM est cité pour comparaison. Plus loin, l'OM apparaît encore dans un rappel de contexte."
+  });
+  assertDecision(result, "needs_review", "strong_alias_body_repeated");
+});
+
+test("weak aliases mentioned only deep in body do not create review noise", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "Lyon", strength: "weak" }],
+    title: "Une actualité sans rapport avec le club",
+    excerpt: "Le sujet concerne une autre équipe.",
+    content: ("Le texte développe un autre sujet sportif. ".repeat(20)) + "Un déplacement à Lyon est évoqué en fin d'article."
+  });
+  assertDecision(result, "rejected", "club_not_relevant");
 });
