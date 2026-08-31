@@ -1,0 +1,173 @@
+name: Audit collection now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collection-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit latest collection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Worker diagnostics
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+
+          curl --fail-with-body --silent --show-error "$BASE_URL/health"             -o health.json
+
+          curl --fail-with-body --silent --show-error "$BASE_URL/api/collection-audit?limit=100"             -o collection-audit.json
+
+          curl --fail-with-body --silent --show-error "$BASE_URL/api/collection-runs?limit=5"             -o collection-runs.json
+
+          curl --fail-with-body --silent --show-error "$BASE_URL/api/sources"             -o sources.json
+
+      - name: Print collection audit
+        run: |
+          python3 - <<'PY'
+          import json
+
+          source_ids = [
+              "sports_fr",
+              "topmercato",
+              "butfootballclub",
+              "ferveur_lyonnaise",
+              "madeingones",
+              "sports_orange",
+              "sport365",
+          ]
+
+          with open("health.json", encoding="utf-8") as f:
+              health = json.load(f)
+          with open("collection-audit.json", encoding="utf-8") as f:
+              audit = json.load(f)
+          with open("collection-runs.json", encoding="utf-8") as f:
+              runs = json.load(f)
+          with open("sources.json", encoding="utf-8") as f:
+              sources = json.load(f)
+
+          print("=== HEALTH ===")
+          print(json.dumps(health, ensure_ascii=False, indent=2))
+
+          latest = audit.get("latest_run") or {}
+          details = {
+              row.get("source"): row
+              for row in (latest.get("source_details") or [])
+              if isinstance(row, dict)
+          }
+
+          print("\n=== LATEST COLLECTION RUN ===")
+          print(f"id: {latest.get('id')}")
+          print(f"started_at: {latest.get('started_at')}")
+          print(f"finished_at: {latest.get('finished_at')}")
+          print(f"status: {latest.get('status')}")
+
+          print("\n=== TARGET SOURCES ===")
+          for source_id in source_ids:
+              row = details.get(source_id)
+              if not row:
+                  print(f"{source_id}: NOT PRESENT IN LATEST RUN")
+                  continue
+
+              if row.get("ok"):
+                  print(
+                      f"{source_id}: OK | "
+                      f"discovered={row.get('discovered', 0)} | "
+                      f"inserted={row.get('inserted', 0)} | "
+                      f"updated={row.get('updated', 0)}"
+                  )
+              else:
+                  print(
+                      f"{source_id}: ERROR | "
+                      f"{row.get('error', 'unknown error')}"
+                  )
+
+          print("\n=== RECENT COLLECTION RUNS ===")
+          for run in runs.get("runs", []):
+              print(
+                  f"{run.get('started_at')} | "
+                  f"status={run.get('status')} | "
+                  f"sources={run.get('sources_succeeded')}/{run.get('sources_attempted')} | "
+                  f"discovered={run.get('articles_discovered')} | "
+                  f"inserted={run.get('articles_inserted')} | "
+                  f"updated={run.get('articles_updated')} | "
+                  f"errors={run.get('error_count')}"
+              )
+
+          enabled = {
+              row.get("id"): row
+              for row in sources.get("sources", [])
+              if isinstance(row, dict)
+          }
+
+          print("\n=== SOURCE CATALOG STATUS ===")
+          for source_id in source_ids:
+              row = enabled.get(source_id)
+              if not row:
+                  print(f"{source_id}: NOT IN /api/sources")
+                  continue
+              print(
+                  f"{source_id}: enabled={row.get('enabled')} | "
+                  f"scope={row.get('scope')} | "
+                  f"discovery_method={row.get('discovery_method')} | "
+                  f"relation_type={row.get('relation_type')} | "
+                  f"priority={row.get('priority')}"
+              )
+          PY
+
+      - name: Write GitHub job summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          targets = [
+              ("sports_fr", "Sports.fr"),
+              ("topmercato", "Top Mercato"),
+              ("butfootballclub", "But! Football Club"),
+              ("ferveur_lyonnaise", "Ferveur Lyonnaise"),
+              ("madeingones", "MadeInGones"),
+              ("sports_orange", "Sports Orange"),
+              ("sport365", "Sport365"),
+          ]
+
+          with open("collection-audit.json", encoding="utf-8") as f:
+              audit = json.load(f)
+
+          latest = audit.get("latest_run") or {}
+          details = {
+              row.get("source"): row
+              for row in (latest.get("source_details") or [])
+              if isinstance(row, dict)
+          }
+
+          print("# Club Actu — latest collection audit")
+          print()
+          print(f"- Run: `{latest.get('id')}`")
+          print(f"- Started: `{latest.get('started_at')}`")
+          print(f"- Finished: `{latest.get('finished_at')}`")
+          print(f"- Status: **{latest.get('status')}**")
+          print()
+          print("| Source | Result | Discovered | Inserted | Updated | Error |")
+          print("|---|---:|---:|---:|---:|---|")
+
+          for source_id, label in targets:
+              row = details.get(source_id)
+              if not row:
+                  print(f"| {label} | missing | — | — | — | not present in latest run |")
+              elif row.get("ok"):
+                  print(
+                      f"| {label} | OK | {row.get('discovered', 0)} | "
+                      f"{row.get('inserted', 0)} | {row.get('updated', 0)} | — |"
+                  )
+              else:
+                  error = str(row.get("error", "unknown error")).replace("|", "\\|")
+                  print(f"| {label} | ERROR | — | — | — | {error} |")
+          PY
