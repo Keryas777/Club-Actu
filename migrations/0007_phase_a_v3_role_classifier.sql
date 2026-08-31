@@ -58,3 +58,23 @@ SELECT
   created_at
 FROM article_club_assessments
 WHERE rule_version = 'phase-a-relevance-v2';
+
+-- Keep coarse article status consistent immediately after the v3 seed.
+UPDATE raw_articles
+SET processing_status = 'phase_a_review'
+WHERE EXISTS (
+  SELECT 1
+  FROM article_club_assessments a
+  WHERE a.article_id = raw_articles.id
+    AND a.source_content_hash = raw_articles.content_hash
+    AND a.rule_version = 'phase-a-relevance-v3'
+    AND a.decision = 'needs_review'
+)
+AND NOT EXISTS (
+  SELECT 1
+  FROM article_club_assessments a
+  WHERE a.article_id = raw_articles.id
+    AND a.source_content_hash = raw_articles.content_hash
+    AND a.rule_version = 'phase-a-relevance-v3'
+    AND a.decision = 'relevant'
+);
