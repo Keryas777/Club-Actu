@@ -1,6 +1,6 @@
 const USER_AGENT = "ClubActuBot/0.2 (+https://github.com/Keryas777/Club-Actu)";
 const EXTRACTOR_VERSION = "phase-a-extractor-v1";
-const RULE_VERSION = "phase-a-relevance-v1";
+const RULE_VERSION = "phase-a-relevance-v2";
 
 function compactSpace(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -87,26 +87,124 @@ export function classifyTechnicalArticle(article, extraction) {
   return { status: "usable", reason_code: null };
 }
 
-function aliasRegex(alias) {
+function aliasRegex(alias, global = false) {
   const escaped = String(alias).replace(/[.*+?^\${}()|[\]\\]/g, "\\$&");
-  return new RegExp("(^|[^\\p{L}\\p{N}])" + escaped + "([^\\p{L}\\p{N}]|$)", "iu");
+  return new RegExp(
+    "(^|[^\\p{L}\\p{N}])" + escaped + "([^\\p{L}\\p{N}]|$)",
+    global ? "giu" : "iu"
+  );
+}
+
+function aliasMatches(text, alias) {
+  const value = compactSpace(text);
+  if (!value) return 0;
+  return [...value.matchAll(aliasRegex(alias, true))].length;
+}
+
+function buildAliasEvidence(aliases, title, excerpt, content) {
+  const cleanTitle = compactSpace(title);
+  const cleanExcerpt = compactSpace(excerpt);
+  const cleanContent = compactSpace(content);
+  const lead = cleanContent.slice(0, 900);
+
+  return aliases.map((entry) => {
+    const evidence = {
+      alias: entry.alias,
+      strength: entry.strength,
+      title: aliasMatches(cleanTitle, entry.alias),
+      excerpt: aliasMatches(cleanExcerpt, entry.alias),
+      lead: aliasMatches(lead, entry.alias),
+      body: aliasMatches(cleanContent, entry.alias)
+    };
+    evidence.total = evidence.title + evidence.excerpt + evidence.body;
+    return evidence;
+  });
+}
+
+function detailFor(evidence, matchedField) {
+  return JSON.stringify({
+    matched_alias: evidence.alias,
+    strength: evidence.strength,
+    matched_field: matchedField,
+    occurrences: {
+      title: evidence.title,
+      excerpt: evidence.excerpt,
+      lead: evidence.lead,
+      body: evidence.body
+    }
+  });
 }
 
 export function assessClubRelevance({ relationType, aliases, title, excerpt, content }) {
-  const haystack = compactSpace([title, excerpt, content].filter(Boolean).join(" "));
   if (relationType === "direct") {
     return { decision: "relevant", reason_code: "direct_club_source" };
   }
 
-  const strong = aliases.filter((a) => a.strength === "strong");
-  const weak = aliases.filter((a) => a.strength !== "strong");
+  const evidence = buildAliasEvidence(aliases, title, excerpt, content);
+  const strong = evidence.filter((item) => item.strength === "strong");
+  const weak = evidence.filter((item) => item.strength !== "strong");
 
-  if (strong.some((a) => aliasRegex(a.alias).test(haystack))) {
-    return { decision: "relevant", reason_code: "strong_club_alias" };
+  const titleStrong = strong.find((item) => item.title > 0);
+  if (titleStrong) {
+    return {
+      decision: "relevant",
+      reason_code: "strong_alias_title",
+      reason_detail: detailFor(titleStrong, "title")
+    };
   }
 
-  if (weak.some((a) => aliasRegex(a.alias).test(haystack))) {
-    return { decision: "needs_review", reason_code: "weak_club_alias" };
+  const excerptStrong = strong.find((item) => item.excerpt > 0);
+  if (excerptStrong) {
+    return {
+      decision: "relevant",
+      reason_code: "strong_alias_excerpt",
+      reason_detail: detailFor(excerptStrong, "excerpt")
+    };
+  }
+
+  const leadStrong = strong.find((item) => item.lead > 0);
+  if (leadStrong) {
+    return {
+      decision: "relevant",
+      reason_code: "strong_alias_lead",
+      reason_detail: detailFor(leadStrong, "lead")
+    };
+  }
+
+  const bodyStrong = strong.find((item) => item.body > 0);
+  if (bodyStrong) {
+    return {
+      decision: "needs_review",
+      reason_code: bodyStrong.body > 1 ? "strong_alias_body_repeated" : "strong_alias_body_only",
+      reason_detail: detailFor(bodyStrong, "body")
+    };
+  }
+
+  const titleWeak = weak.find((item) => item.title > 0);
+  if (titleWeak) {
+    return {
+      decision: "needs_review",
+      reason_code: "weak_alias_title",
+      reason_detail: detailFor(titleWeak, "title")
+    };
+  }
+
+  const excerptWeak = weak.find((item) => item.excerpt > 0);
+  if (excerptWeak) {
+    return {
+      decision: "needs_review",
+      reason_code: "weak_alias_excerpt",
+      reason_detail: detailFor(excerptWeak, "excerpt")
+    };
+  }
+
+  const leadWeak = weak.find((item) => item.lead > 0);
+  if (leadWeak) {
+    return {
+      decision: "needs_review",
+      reason_code: "weak_alias_lead",
+      reason_detail: detailFor(leadWeak, "lead")
+    };
   }
 
   return { decision: "rejected", reason_code: "club_not_relevant" };
@@ -640,6 +738,9 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
   const waiting = await db.prepare(
     `SELECT COUNT(*) AS n
      FROM raw_articles r
+     JOIN club_sources cs
+       ON cs.source_id = r.source_id
+      AND cs.club_id = ?
      WHERE r.content_hash IS NOT NULL
        AND (
          NOT EXISTS (
@@ -664,20 +765,24 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
                AND e.extractor_version = ?
                AND e.status = 'completed'
            )
-           AND EXISTS (
-             SELECT 1 FROM club_sources cs
-             WHERE cs.source_id = r.source_id
-               AND NOT EXISTS (
-                 SELECT 1 FROM article_club_assessments a
-                 WHERE a.article_id = r.id
-                   AND a.club_id = cs.club_id
-                   AND a.source_content_hash = r.content_hash
-                   AND a.rule_version = ?
-               )
+           AND NOT EXISTS (
+             SELECT 1 FROM article_club_assessments a
+             WHERE a.article_id = r.id
+               AND a.club_id = ?
+               AND a.source_content_hash = r.content_hash
+               AND a.rule_version = ?
            )
          )
        )`
-  ).bind(EXTRACTOR_VERSION, EXTRACTOR_VERSION, new Date().toISOString(), EXTRACTOR_VERSION, RULE_VERSION).first();
+  ).bind(
+    clubId,
+    EXTRACTOR_VERSION,
+    EXTRACTOR_VERSION,
+    new Date().toISOString(),
+    EXTRACTOR_VERSION,
+    clubId,
+    RULE_VERSION
+  ).first();
 
   const counts = await db.prepare(
     `SELECT
@@ -721,7 +826,7 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
   let examples;
   if (extractionStatusFilter) {
     let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
-                      a.decision, a.reason_code,
+                      a.decision, a.reason_code, a.reason_detail,
                       e.status AS extraction_status,
                       e.error_code, e.error_detail, e.retry_after, e.updated_at
                FROM raw_articles r
@@ -747,7 +852,7 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
     ({ results: examples } = await db.prepare(sql).bind(...bindings).all());
   } else {
     let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
-                      a.decision, a.reason_code, a.decided_at
+                      a.decision, a.reason_code, a.reason_detail, a.decided_at
                FROM article_club_assessments a
                JOIN raw_articles r ON r.id = a.article_id
                WHERE a.club_id = ?
