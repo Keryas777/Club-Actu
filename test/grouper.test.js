@@ -31,7 +31,7 @@ test("same transfer story from different sources is suggested", () => {
 
   const pairs = buildPreviewPairs(rows, ["PSG", "Paris Saint-Germain"], 10);
   assert.equal(pairs.length, 1);
-  assert.ok(["strong", "possible"].includes(pairs[0].confidence));
+  assert.ok(["strong", "candidate"].includes(pairs[0].confidence));
   assert.ok(pairs[0].shared_context_tokens.includes("barcola"));
   assert.ok(pairs[0].shared_context_tokens.includes("liverpool"));
 });
@@ -129,4 +129,56 @@ test("same named transfer target survives different headline wording", () => {
   assert.equal(pairs.length, 1);
   assert.ok(pairs[0].shared_entity_tokens.includes("balerdi"));
   assert.ok(pairs[0].shared_entity_tokens.includes("roma"));
+});
+
+
+test("one shared player name is not enough to create a candidate", () => {
+  const rows = [
+    {
+      id: "a",
+      source_id: "source_a",
+      title: "Après Barcola, Ibrahim Mbaye vers Aston Villa",
+      excerpt: "Le jeune Parisien pourrait quitter le club anglais cet été.",
+      content: "",
+      published_at: "2026-08-31T06:00:00Z"
+    },
+    {
+      id: "b",
+      source_id: "source_b",
+      title: "Al-Khelaïfi a négocié cinq millions de plus pour Barcola",
+      excerpt: "Le dossier Bradley Barcola avec Liverpool a été tendu.",
+      content: "",
+      published_at: "2026-08-31T07:00:00Z"
+    }
+  ];
+
+  const pairs = buildPreviewPairs(rows, ["PSG", "Paris Saint-Germain"], 10);
+  assert.equal(pairs.length, 0);
+});
+
+test("Balerdi and Rome form a real candidate core across different wording", () => {
+  const rows = [
+    {
+      id: "a",
+      source_id: "source_a",
+      title: "19h Mercato : Balerdi à Rome, Ricci à Côme, Brassier proche de Francfort",
+      excerpt: "Plusieurs dossiers sont bouclés ce soir.",
+      content: "",
+      published_at: "2026-08-31T06:00:00Z"
+    },
+    {
+      id: "b",
+      source_id: "source_b",
+      title: "Leonardo Balerdi a posé ses valises à Rome",
+      excerpt: "Le défenseur argentin est arrivé dans la capitale italienne.",
+      content: "",
+      published_at: "2026-08-31T06:30:00Z"
+    }
+  ];
+
+  const pairs = buildPreviewPairs(rows, ["OM", "Olympique de Marseille", "Marseille"], 10);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].confidence, "candidate");
+  assert.ok(pairs[0].shared_entity_tokens.includes("balerdi"));
+  assert.ok(pairs[0].shared_entity_tokens.includes("rome"));
 });
