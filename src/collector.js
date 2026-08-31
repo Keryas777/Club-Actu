@@ -170,6 +170,33 @@ async function discoverOlApi(adapter) {
     discoveryMethod: "api"
   }));
 }
+function extractXmlTag(block, tag) {
+  const re = new RegExp("<" + tag + "\\b[^>]*>([\\s\\S]*?)<\\/" + tag + ">", "i");
+  const m = re.exec(block);
+  if (!m) return "";
+  return decodeEntities(m[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, "$1").replace(/<[^>]+>/g, " "));
+}
+
+function discoverRss(xml, adapter) {
+  const found = new Map();
+  const itemRe = /<item\\b[^>]*>([\\s\\S]*?)<\\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(xml))) {
+    const block = m[1];
+    const rawUrl = extractXmlTag(block, "link") || extractXmlTag(block, "guid");
+    const title = extractXmlTag(block, "title");
+    if (!rawUrl || !looksLikeArticleTitle(title)) continue;
+    const url = absoluteUrl(rawUrl, adapter.discoveryUrl);
+    if (!url) continue;
+    const u = new URL(url);
+    if (adapter.articleHosts && !adapter.articleHosts.includes(u.hostname)) continue;
+    const canonical = canonicalize(url);
+    if (!found.has(canonical)) found.set(canonical, { url: canonical, title, excerpt: extractXmlTag(block, "description"), publishedAt: extractXmlTag(block, "pubDate") || null, discoveryMethod: "rss" });
+    if (found.size >= 50) break;
+  }
+  return [...found.values()];
+}
+
 function discoverLinks(html, adapter) {
   const found = new Map();
 
@@ -308,7 +335,7 @@ export async function collectAll(db) {
       } else {
         const page = await fetchText(adapter.discoveryUrl);
         if (!page.ok) throw new Error(`HTTP ${page.status}`);
-        links = discoverLinks(page.text, adapter);
+        links = adapter.discoveryMode === "rss" ? discoverRss(page.text, adapter) : discoverLinks(page.text, adapter);
       }
       discovered += links.length;
       let sourceInserted = 0, sourceUpdated = 0;
