@@ -217,7 +217,7 @@ test("clickbait title can still be relevant when the club is central in the exce
     excerpt: "Le PSG a reçu la réponse du joueur ce dimanche.",
     content: ""
   });
-  assertDecision(result, "relevant", "strong_alias_excerpt");
+  assertDecision(result, "needs_review", "strong_alias_excerpt_role_review");
 });
 
 test("clickbait title can still be relevant when the club appears immediately in the article lead", () => {
@@ -228,7 +228,7 @@ test("clickbait title can still be relevant when the club appears immediately in
     excerpt: "",
     content: "L'OM a décidé de mettre fin aux discussions avec le joueur. Les dirigeants marseillais veulent avancer rapidement."
   });
-  assertDecision(result, "relevant", "strong_alias_lead");
+  assertDecision(result, "needs_review", "strong_alias_lead_role_review");
 });
 
 test("a club mentioned only deep in the body is not auto-promoted to relevant", () => {
@@ -276,7 +276,7 @@ test("reason detail exposes the triggering excerpt context", () => {
     content: ""
   });
 
-  assertDecision(result, "relevant", "strong_alias_excerpt");
+  assertDecision(result, "needs_review", "strong_alias_excerpt_role_review");
   const detail = JSON.parse(result.reason_detail);
   assert.equal(detail.matched_alias, "PSG");
   assert.equal(detail.matched_field, "excerpt");
@@ -338,4 +338,27 @@ test("Phase A v3 preview leaves existing review and rejected decisions unchanged
     previewV3Decision("rejected", "club_not_relevant"),
     { decision: "rejected", reason_code: "club_not_relevant" }
   );
+});
+
+
+test("Phase A v3 routes strong excerpt evidence to role review", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "PSG", strength: "strong" }],
+    title: "Stade Rennais : une nouvelle piste",
+    excerpt: "Après son match contre le PSG, Rennes travaille sur son mercato.",
+    content: ""
+  });
+  assertDecision(result, "needs_review", "strong_alias_excerpt_role_review");
+});
+
+test("Phase A v3 routes strong lead evidence to role review", () => {
+  const result = assessClubRelevance({
+    relationType: "relevant",
+    aliases: [{ alias: "OM", strength: "strong" }],
+    title: "Le verdict est tombé",
+    excerpt: "",
+    content: "L'OM a décidé de mettre fin aux discussions avec le joueur."
+  });
+  assertDecision(result, "needs_review", "strong_alias_lead_role_review");
 });
