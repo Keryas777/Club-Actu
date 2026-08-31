@@ -85,3 +85,30 @@ test("role classifier prompt only sends the matched text field", () => {
   assert.equal(Object.hasOwn(payload, "excerpt"), false);
   assert.equal(Object.hasOwn(payload, "lead"), false);
 });
+
+
+test("role labels stay compatible with strict JSON schema enum", () => {
+  const expected = [
+    "subject",
+    "transfer_party",
+    "financial_stakeholder",
+    "opponent",
+    "historical_reference",
+    "relative_or_personal_link",
+    "incidental",
+    "unclear"
+  ];
+  assert.deepEqual(
+    expected.sort(),
+    [
+      "subject",
+      "transfer_party",
+      "financial_stakeholder",
+      "opponent",
+      "historical_reference",
+      "relative_or_personal_link",
+      "incidental",
+      "unclear"
+    ].sort()
+  );
+});
