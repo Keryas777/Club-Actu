@@ -50,6 +50,7 @@ jobs:
               "article_extractions",
               "article_club_assessments",
               "processing_runs",
+              "article_club_role_classifications",
           }
           actual = {
               row[0]
