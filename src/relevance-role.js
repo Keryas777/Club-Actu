@@ -19,16 +19,23 @@ export const AUTO_RELEVANT_ROLES = new Set([
 
 export function buildRoleClassifierPrompt(input) {
   const aliases = Array.isArray(input.aliases) ? input.aliases : [];
+  const matchedField = input.matched_field || null;
+  const matchedText =
+    matchedField === "excerpt"
+      ? String(input.excerpt || "").slice(0, 700)
+      : matchedField === "lead"
+        ? String(input.lead || "").slice(0, 700)
+        : String(input.match_context || "").slice(0, 700);
+
   const payload = {
     club_id: input.club_id,
     club_name: input.club_name || input.club_id,
     aliases,
-    title: input.title || "",
-    excerpt: input.excerpt || "",
-    lead: input.lead || "",
+    title: String(input.title || "").slice(0, 300),
     matched_alias: input.matched_alias || null,
-    matched_field: input.matched_field || null,
-    match_context: input.match_context || null
+    matched_field: matchedField,
+    match_context: String(input.match_context || "").slice(0, 500) || null,
+    matched_text: matchedText
   };
 
   return [
@@ -135,27 +142,66 @@ export async function classifyRoleWithProvider(env, input) {
     };
   }
 
-  const response = await fetch(baseUrl + "/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + apiKey,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      max_tokens: 180,
-      messages: buildRoleClassifierPrompt(input)
-    })
-  });
+  let response = null;
+  let text = "";
+  let attempts = 0;
+  const maxAttempts = 5;
 
-  const text = await response.text();
-  if (!response.ok) {
+  while (attempts < maxAttempts) {
+    attempts += 1;
+
+    response = await fetch(baseUrl + "/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + apiKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 180,
+        messages: buildRoleClassifierPrompt(input)
+      })
+    });
+
+    text = await response.text();
+    if (response.ok) break;
+
+    if (response.status !== 429 || attempts >= maxAttempts) {
+      return {
+        configured: true,
+        classifier_version: ROLE_CLASSIFIER_VERSION,
+        error: "provider_http_error",
+        status: response.status,
+        attempts,
+        detail: text.slice(0, 500)
+      };
+    }
+
+    const retryAfterHeader = Number(response.headers.get("retry-after"));
+    const retryFromBody = Number(
+      text.match(/try again in\s+([0-9.]+)s/i)?.[1] || 0
+    );
+    const retrySeconds = Math.min(
+      15,
+      Math.max(
+        1,
+        Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 0,
+        Number.isFinite(retryFromBody) && retryFromBody > 0 ? retryFromBody : 0,
+        attempts * 1.5
+      )
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, Math.ceil(retrySeconds * 1000)));
+  }
+
+  if (!response?.ok) {
     return {
       configured: true,
       classifier_version: ROLE_CLASSIFIER_VERSION,
       error: "provider_http_error",
-      status: response.status,
+      status: response?.status || 0,
+      attempts,
       detail: text.slice(0, 500)
     };
   }
@@ -177,6 +223,7 @@ export async function classifyRoleWithProvider(env, input) {
       configured: true,
       classifier_version: ROLE_CLASSIFIER_VERSION,
       model,
+      attempts,
       ...parsed
     };
   } catch (error) {
