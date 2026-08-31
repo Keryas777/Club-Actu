@@ -145,3 +145,55 @@ test("Le Progres logout artifacts are navigation pages", () => {
     { status: "rejected", reason_code: "navigation_page" }
   );
 });
+
+
+test("PSG aliases do not treat generic Paris as relevant", () => {
+  const aliases = [
+    { alias: "Paris Saint-Germain", strength: "strong" },
+    { alias: "Paris Saint Germain", strength: "strong" },
+    { alias: "Paris SG", strength: "strong" },
+    { alias: "PSG", strength: "strong" }
+  ];
+
+  assert.deepEqual(
+    assessClubRelevance({
+      relationType: "relevant",
+      aliases,
+      title: "Paris FC domine Nice en Ligue 1",
+      excerpt: "",
+      content: ""
+    }),
+    { decision: "rejected", reason_code: "club_not_relevant" }
+  );
+
+  assert.deepEqual(
+    assessClubRelevance({
+      relationType: "relevant",
+      aliases,
+      title: "Le PSG prépare son prochain rendez-vous européen",
+      excerpt: "",
+      content: ""
+    }),
+    { decision: "relevant", reason_code: "strong_club_alias" }
+  );
+});
+
+test("OM aliases recognize Marseille without OL-specific assumptions", () => {
+  const aliases = [
+    { alias: "Olympique de Marseille", strength: "strong" },
+    { alias: "Olympique Marseille", strength: "strong" },
+    { alias: "OM", strength: "strong" },
+    { alias: "Marseille", strength: "strong" }
+  ];
+
+  assert.deepEqual(
+    assessClubRelevance({
+      relationType: "relevant",
+      aliases,
+      title: "Mercato : Marseille avance sur un défenseur",
+      excerpt: "",
+      content: ""
+    }),
+    { decision: "relevant", reason_code: "strong_club_alias" }
+  );
+});
