@@ -798,7 +798,29 @@ export async function drainPhaseA(db, options = {}) {
   };
 }
 
-export async function getRelevanceAudit(db, clubId = "ol", exampleLimit = 50) {
+
+function compactAuditExample(example, clubId) {
+  const enriched = enrichDiagnosticExample(example);
+  let detail = null;
+  try {
+    detail = enriched?.reason_detail ? JSON.parse(enriched.reason_detail) : null;
+  } catch {
+    detail = null;
+  }
+
+  return {
+    club_id: clubId,
+    source_id: enriched?.source_id || null,
+    title: enriched?.title || null,
+    reason_code: enriched?.reason_code || null,
+    matched_alias: detail?.matched_alias || null,
+    matched_field: detail?.matched_field || null,
+    match_context: enriched?.match_context || detail?.match_context || null,
+    url: enriched?.url || null
+  };
+}
+
+export async function getRelevanceAudit(db, clubId = "ol", exampleLimit = 50, options = {}) {
   const { results: reasonCounts } = await db.prepare(
     `SELECT a.reason_code, COUNT(*) AS count
      FROM article_club_assessments a
@@ -851,7 +873,9 @@ export async function getRelevanceAudit(db, clubId = "ol", exampleLimit = 50) {
     audited_reasons: ["strong_alias_lead", "strong_alias_excerpt"],
     reason_counts: reasonCounts || [],
     source_counts: sourceCounts || [],
-    examples: (examples || []).map(enrichDiagnosticExample)
+    examples: options.compact
+      ? (examples || []).map((example) => compactAuditExample(example, clubId))
+      : (examples || []).map(enrichDiagnosticExample)
   };
 }
 
