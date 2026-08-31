@@ -118,7 +118,12 @@ function classifyPair(score, sharedTitle, sharedContext, hours) {
   ) return "strong";
   if (
     (score >= 0.38 && sharedContext.length >= 2) ||
-    (score >= 0.32 && sharedTitle.length >= 2)
+    (score >= 0.32 && sharedTitle.length >= 2) ||
+    (
+      sharedTitle.length >= 1 &&
+      sharedContext.length >= 3 &&
+      (hours == null || hours <= 12)
+    )
   ) return "possible";
   return "none";
 }
