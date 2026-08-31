@@ -78,7 +78,8 @@ export const SOURCE_ADAPTERS = {
     id: "sports_orange",
     discoveryUrl: "https://sports.orange.fr/football/",
     articleHosts: ["sports.orange.fr"],
-    includePath: /\/football\//i
+    includePath: /\/football\//i,
+    excludePath: /\/videos\/football\//i
   },
 };
 
