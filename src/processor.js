@@ -1057,7 +1057,15 @@ export async function runRoleClassifierPreview(db, env, clubId = "ol", exampleLi
   });
 
   const classified = [];
-  for (const { row, input } of inputs) {
+  const interRequestDelayMs = 2000;
+
+  for (let index = 0; index < inputs.length; index += 1) {
+    const { row, input } = inputs[index];
+
+    if (index > 0) {
+      await new Promise((resolve) => setTimeout(resolve, interRequestDelayMs));
+    }
+
     const classification = await classifyRoleWithProvider(env, input);
     const preview = classification.error
       ? { decision: "needs_review", reason_code: "role_classifier_error" }
