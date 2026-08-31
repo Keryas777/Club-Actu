@@ -9,6 +9,7 @@ on:
         default: "psg"
         type: choice
         options:
+          - all
           - psg
           - om
           - ol
@@ -44,9 +45,17 @@ jobs:
             exit 1
           fi
 
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Authorization: Bearer ${MANUAL_TRIGGER_TOKEN}" \
-            --header "Accept: application/json" \
-            "https://club-actu.deliriousfan7.workers.dev/api/relevance-role-preview?club=${CLUB}&limit=${ARTICLE_LIMIT}" \
-            | python3 -m json.tool
+          clubs=("${CLUB}")
+          if [[ "${CLUB}" == "all" ]]; then
+            clubs=("psg" "om" "ol")
+          fi
+
+          for current_club in "${clubs[@]}"; do
+            echo "===== ${current_club^^} ====="
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${MANUAL_TRIGGER_TOKEN}" \
+              --header "Accept: application/json" \
+              "https://club-actu.deliriousfan7.workers.dev/api/relevance-role-preview?club=${current_club}&limit=${ARTICLE_LIMIT}" \
+              | python3 -m json.tool
+          done
