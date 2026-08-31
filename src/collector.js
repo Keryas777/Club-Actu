@@ -399,6 +399,101 @@ async function upsertArticles(db, sourceId, items, now) {
   return { inserted, updated };
 }
 
+export async function normalizeStoredEntities(db, limit = 100) {
+  const cappedLimit = Math.max(1, Math.min(200, Number(limit || 100)));
+  const entityPredicates = [
+    "title LIKE '%&#%'",
+    "excerpt LIKE '%&#%'",
+    "lower(title) LIKE '%&rsquo;%'",
+    "lower(excerpt) LIKE '%&rsquo;%'",
+    "lower(title) LIKE '%&lsquo;%'",
+    "lower(excerpt) LIKE '%&lsquo;%'",
+    "lower(title) LIKE '%&rdquo;%'",
+    "lower(excerpt) LIKE '%&rdquo;%'",
+    "lower(title) LIKE '%&ldquo;%'",
+    "lower(excerpt) LIKE '%&ldquo;%'",
+    "lower(title) LIKE '%&ndash;%'",
+    "lower(excerpt) LIKE '%&ndash;%'",
+    "lower(title) LIKE '%&mdash;%'",
+    "lower(excerpt) LIKE '%&mdash;%'",
+    "lower(title) LIKE '%&hellip;%'",
+    "lower(excerpt) LIKE '%&hellip;%'",
+    "lower(title) LIKE '%&laquo;%'",
+    "lower(excerpt) LIKE '%&laquo;%'",
+    "lower(title) LIKE '%&raquo;%'",
+    "lower(excerpt) LIKE '%&raquo;%'",
+    "lower(title) LIKE '%&amp;#%'",
+    "lower(excerpt) LIKE '%&amp;#%'"
+  ];
+
+  const { results } = await db.prepare(
+    `SELECT id, source_id, canonical_url, title, excerpt, published_at, content_hash
+     FROM raw_articles
+     WHERE ${entityPredicates.join(" OR ")}
+     ORDER BY last_seen_at ASC
+     LIMIT ?`
+  ).bind(cappedLimit).all();
+
+  const rows = results || [];
+  let changed = 0;
+  const articleStatements = [];
+  const versionStatements = [];
+  const examples = [];
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    const normalizedTitle = decodeEntities(row.title || "");
+    const normalizedExcerpt = decodeEntities(row.excerpt || "");
+    if (normalizedTitle === (row.title || "") && normalizedExcerpt === (row.excerpt || "")) {
+      continue;
+    }
+
+    const nextHash = await sha256Hex(
+      [normalizedTitle, normalizedExcerpt, row.published_at || ""].join("|") || row.canonical_url
+    );
+
+    articleStatements.push(
+      db.prepare(
+        `UPDATE raw_articles
+         SET title = ?, excerpt = ?, content_hash = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).bind(normalizedTitle, normalizedExcerpt || null, nextHash, row.id)
+    );
+
+    versionStatements.push(
+      db.prepare(
+        `INSERT OR IGNORE INTO article_versions
+         (article_id, content_hash, title, excerpt, captured_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(row.id, nextHash, normalizedTitle, normalizedExcerpt || null, now)
+    );
+
+    changed++;
+    if (examples.length < 10) {
+      examples.push({
+        id: row.id,
+        source: row.source_id,
+        before: row.title,
+        after: normalizedTitle
+      });
+    }
+  }
+
+  for (let i = 0; i < articleStatements.length; i += 50) {
+    await db.batch(articleStatements.slice(i, i + 50));
+  }
+  for (let i = 0; i < versionStatements.length; i += 50) {
+    await db.batch(versionStatements.slice(i, i + 50));
+  }
+
+  return {
+    scanned: rows.length,
+    changed,
+    remaining_possible: rows.length === cappedLimit,
+    examples
+  };
+}
+
 async function checkpointRun(db, runId, counters, details, finishedAt = null) {
   const status = finishedAt
     ? (counters.errors === counters.attempted

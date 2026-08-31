@@ -1,4 +1,4 @@
-import { collectAll, repairMojibake } from "./collector.js";
+import { collectAll, repairMojibake, normalizeStoredEntities } from "./collector.js";
 import { drainPhaseA, getProcessingDiagnostics, getRelevanceAudit } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
 
@@ -103,6 +103,20 @@ async function handleApi(request, env, url) {
       recent_articles: recent,
       suspicious_legacy_rows: suspicious
     });
+  }
+
+  if (url.pathname === "/api/normalize-stored-text" && request.method === "POST") {
+    if (!env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+    }
+
+    const token = bearerToken(request);
+    if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const result = await normalizeStoredEntities(env.DB, 100);
+    return json({ ok: true, trigger: "normalize_stored_text", ...result });
   }
 
   if (url.pathname === "/api/collect-now" && request.method === "POST") {
