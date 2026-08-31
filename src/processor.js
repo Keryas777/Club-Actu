@@ -101,6 +101,21 @@ function aliasMatches(text, alias) {
   return [...value.matchAll(aliasRegex(alias, true))].length;
 }
 
+function aliasContext(text, alias, radius = 120) {
+  const value = compactSpace(text);
+  if (!value) return null;
+  const haystack = value.toLocaleLowerCase("fr");
+  const needle = String(alias || "").toLocaleLowerCase("fr");
+  const index = haystack.indexOf(needle);
+  if (index < 0) return null;
+
+  const start = Math.max(0, index - radius);
+  const end = Math.min(value.length, index + needle.length + radius);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < value.length ? "…" : "";
+  return prefix + value.slice(start, end).trim() + suffix;
+}
+
 function buildAliasEvidence(aliases, title, excerpt, content) {
   const cleanTitle = compactSpace(title);
   const cleanExcerpt = compactSpace(excerpt);
@@ -116,7 +131,13 @@ function buildAliasEvidence(aliases, title, excerpt, content) {
       excerpt: aliasMatches(cleanExcerpt, entry.alias),
       lead: aliasMatches(lead, entry.alias),
       body: aliasMatches(cleanContent, entry.alias),
-      body_after_lead: aliasMatches(bodyAfterLead, entry.alias)
+      body_after_lead: aliasMatches(bodyAfterLead, entry.alias),
+      contexts: {
+        title: aliasContext(cleanTitle, entry.alias),
+        excerpt: aliasContext(cleanExcerpt, entry.alias),
+        lead: aliasContext(lead, entry.alias),
+        body: aliasContext(bodyAfterLead, entry.alias)
+      }
     };
     evidence.total = evidence.title + evidence.excerpt + evidence.body;
     return evidence;
@@ -128,6 +149,7 @@ function detailFor(evidence, matchedField) {
     matched_alias: evidence.alias,
     strength: evidence.strength,
     matched_field: matchedField,
+    match_context: evidence.contexts?.[matchedField] || null,
     occurrences: {
       title: evidence.title,
       excerpt: evidence.excerpt,
@@ -135,6 +157,48 @@ function detailFor(evidence, matchedField) {
       body: evidence.body
     }
   });
+}
+
+function enrichDiagnosticExample(example) {
+  if (!example) return example;
+
+  let detail = null;
+  try {
+    detail = example.reason_detail ? JSON.parse(example.reason_detail) : null;
+  } catch {
+    detail = null;
+  }
+
+  const alias = detail?.matched_alias;
+  const field = detail?.matched_field;
+  if (!alias || !field) return example;
+
+  let sourceText = "";
+  if (field === "title") {
+    sourceText = example.normalized_title || example.title || "";
+  } else if (field === "excerpt") {
+    sourceText = example.normalized_excerpt || "";
+  } else if (field === "lead") {
+    sourceText = compactSpace(example.normalized_content || "").slice(0, 900);
+  } else if (field === "body") {
+    sourceText = compactSpace(example.normalized_content || "").slice(900);
+  }
+
+  const matchContext = detail.match_context || aliasContext(sourceText, alias);
+  const enrichedDetail = { ...detail, match_context: matchContext || null };
+
+  const {
+    normalized_title,
+    normalized_excerpt,
+    normalized_content,
+    ...publicExample
+  } = example;
+
+  return {
+    ...publicExample,
+    match_context: matchContext || null,
+    reason_detail: JSON.stringify(enrichedDetail)
+  };
 }
 
 export function assessClubRelevance({ relationType, aliases, title, excerpt, content }) {
@@ -829,6 +893,7 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
   if (extractionStatusFilter) {
     let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
                       a.decision, a.reason_code, a.reason_detail,
+                      e.normalized_title, e.normalized_excerpt, e.normalized_content,
                       e.status AS extraction_status,
                       e.error_code, e.error_detail, e.retry_after, e.updated_at
                FROM raw_articles r
@@ -854,13 +919,19 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
     ({ results: examples } = await db.prepare(sql).bind(...bindings).all());
   } else {
     let sql = `SELECT r.id, r.source_id, r.title, r.canonical_url AS url,
-                      a.decision, a.reason_code, a.reason_detail, a.decided_at
+                      a.decision, a.reason_code, a.reason_detail, a.decided_at,
+                      e.normalized_title, e.normalized_excerpt, e.normalized_content
                FROM article_club_assessments a
                JOIN raw_articles r ON r.id = a.article_id
+               LEFT JOIN article_extractions e
+                 ON e.article_id = r.id
+                AND e.source_content_hash = r.content_hash
+                AND e.extractor_version = ?
+                AND e.status = 'completed'
                WHERE a.club_id = ?
                  AND a.source_content_hash = r.content_hash
                  AND a.rule_version = ?`;
-    const bindings = [clubId, RULE_VERSION];
+    const bindings = [EXTRACTOR_VERSION, clubId, RULE_VERSION];
 
     if (decisionFilter) {
       sql += " AND a.decision = ?";
@@ -893,7 +964,7 @@ export async function getProcessingDiagnostics(db, clubId = "ol", exampleLimit =
     needs_review: Number(counts?.needs_review || 0),
     ready: Number(ready?.n || 0),
     reasons: reasons || [],
-    examples: examples || [],
+    examples: (examples || []).map(enrichDiagnosticExample),
     latest_run: latestRun || null
   };
 }
