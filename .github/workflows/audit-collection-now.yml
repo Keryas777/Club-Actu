@@ -82,7 +82,8 @@ jobs:
                       f"{source_id}: OK | "
                       f"discovered={row.get('discovered', 0)} | "
                       f"inserted={row.get('inserted', 0)} | "
-                      f"updated={row.get('updated', 0)}"
+                      f"updated={row.get('updated', 0)} | "
+                      f"unchanged={row.get('unchanged', 0)}"
                   )
               else:
                   print(
@@ -155,19 +156,20 @@ jobs:
           print(f"- Finished: `{latest.get('finished_at')}`")
           print(f"- Status: **{latest.get('status')}**")
           print()
-          print("| Source | Result | Discovered | Inserted | Updated | Error |")
-          print("|---|---:|---:|---:|---:|---|")
+          print("| Source | Result | Discovered | Inserted | Updated | Unchanged | Error |")
+          print("|---|---:|---:|---:|---:|---:|---|")
 
           for source_id, label in targets:
               row = details.get(source_id)
               if not row:
-                  print(f"| {label} | missing | — | — | — | not present in latest run |")
+                  print(f"| {label} | missing | — | — | — | — | not present in latest run |")
               elif row.get("ok"):
                   print(
                       f"| {label} | OK | {row.get('discovered', 0)} | "
-                      f"{row.get('inserted', 0)} | {row.get('updated', 0)} | — |"
+                      f"{row.get('inserted', 0)} | {row.get('updated', 0)} | "
+                      f"{row.get('unchanged', 0)} | — |"
                   )
               else:
                   error = str(row.get("error", "unknown error")).replace("|", "\\|")
-                  print(f"| {label} | ERROR | — | — | — | {error} |")
+                  print(f"| {label} | ERROR | — | — | — | — | {error} |")
           PY
