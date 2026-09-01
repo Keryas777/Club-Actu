@@ -290,7 +290,7 @@ function discoverLinks(html, adapter) {
 }
 
 async function upsertArticles(db, sourceId, items, now) {
-  if (!items.length) return { inserted: 0, updated: 0 };
+  if (!items.length) return { inserted: 0, updated: 0, unchanged: 0 };
 
   const prepared = await Promise.all(items.map(async (item) => {
     const normalizedTitle = decodeEntities(item.title || "");
@@ -325,6 +325,7 @@ async function upsertArticles(db, sourceId, items, now) {
 
   let inserted = 0;
   let updated = 0;
+  let unchanged = 0;
   const articleStatements = [];
   const versionStatements = [];
 
@@ -359,6 +360,14 @@ async function upsertArticles(db, sourceId, items, now) {
       continue;
     }
 
+    // Do not rewrite an unchanged article on every 30-minute collection.
+    // raw_articles.last_seen_at participates in several indexes, so even a
+    // heartbeat-only UPDATE creates substantial D1 write amplification.
+    if (existing.content_hash === item.contentHash) {
+      unchanged++;
+      continue;
+    }
+
     updated++;
     articleStatements.push(
       db.prepare(
@@ -373,18 +382,16 @@ async function upsertArticles(db, sourceId, items, now) {
       )
     );
 
-    if (existing.content_hash !== item.contentHash) {
-      versionStatements.push(
-        db.prepare(
-          `INSERT OR IGNORE INTO article_versions
-           (article_id, content_hash, title, excerpt, captured_at)
-           VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          existing.id, item.contentHash, item.normalizedTitle,
-          item.normalizedExcerpt || null, now
-        )
-      );
-    }
+    versionStatements.push(
+      db.prepare(
+        `INSERT OR IGNORE INTO article_versions
+         (article_id, content_hash, title, excerpt, captured_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(
+        existing.id, item.contentHash, item.normalizedTitle,
+        item.normalizedExcerpt || null, now
+      )
+    );
   }
 
   // Parent rows must exist before article_versions because D1 enforces the
@@ -396,7 +403,7 @@ async function upsertArticles(db, sourceId, items, now) {
     await db.batch(versionStatements.slice(i, i + 50));
   }
 
-  return { inserted, updated };
+  return { inserted, updated, unchanged };
 }
 
 export async function normalizeStoredEntities(db, limit = 100) {
@@ -549,6 +556,7 @@ export async function collectAll(db) {
     discovered: 0,
     inserted: 0,
     updated: 0,
+    unchanged: 0,
     errors: 0
   };
   const details = [];
@@ -578,6 +586,7 @@ export async function collectAll(db) {
       counters.discovered += links.length;
       counters.inserted += sourceResult.inserted;
       counters.updated += sourceResult.updated;
+      counters.unchanged += sourceResult.unchanged;
       counters.success++;
 
       details.push({
@@ -586,6 +595,7 @@ export async function collectAll(db) {
         discovered: links.length,
         inserted: sourceResult.inserted,
         updated: sourceResult.updated,
+        unchanged: sourceResult.unchanged,
         duration_ms: Date.now() - sourceStartedAt
       });
     } catch (error) {
@@ -617,6 +627,7 @@ export async function collectAll(db) {
     articles_discovered: counters.discovered,
     articles_inserted: counters.inserted,
     articles_updated: counters.updated,
+    articles_unchanged: counters.unchanged,
     errors: counters.errors,
     details
   };
