@@ -263,6 +263,58 @@ async function handleApi(request, env, url) {
     return json({ ok: true, source: source || null, count: results.length, articles: results });
   }
 
+  if (url.pathname === "/api/hash-instability-audit" && request.method === "GET") {
+    const source = (url.searchParams.get("source") || "").trim();
+    const limit = parseLimit(url, 50, 100);
+    const where = source ? "WHERE r.source_id = ?" : "";
+    const bindings = source ? [source, limit] : [limit];
+
+    const { results } = await env.DB.prepare(
+      `SELECT
+         r.id,
+         r.source_id,
+         r.canonical_url AS url,
+         r.title,
+         r.excerpt,
+         r.published_at,
+         r.content_hash,
+         r.last_seen_at,
+         COUNT(v.id) AS version_count,
+         MIN(v.captured_at) AS first_version_at,
+         MAX(v.captured_at) AS last_version_at
+       FROM raw_articles r
+       LEFT JOIN article_versions v ON v.article_id = r.id
+       ${where}
+       GROUP BY r.id
+       HAVING COUNT(v.id) > 1
+       ORDER BY MAX(v.captured_at) DESC
+       LIMIT ?`
+    ).bind(...bindings).all();
+
+    const items = [];
+    for (const row of results || []) {
+      const { results: versions } = await env.DB.prepare(
+        `SELECT content_hash, title, excerpt, captured_at
+         FROM article_versions
+         WHERE article_id = ?
+         ORDER BY captured_at DESC
+         LIMIT 5`
+      ).bind(row.id).all();
+
+      items.push({
+        ...row,
+        versions: versions || []
+      });
+    }
+
+    return json({
+      ok: true,
+      source: source || null,
+      count: items.length,
+      items
+    });
+  }
+
   if (url.pathname === "/api/collection-runs" && request.method === "GET") {
     const limit = parseLimit(url, 10, 50);
     const { results } = await env.DB.prepare(
