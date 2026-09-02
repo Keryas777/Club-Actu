@@ -105,6 +105,37 @@ function stripTags(html = "") {
     .replace(/<[^>]+>/g, " "));
 }
 
+export function normalizeSourceTitle(sourceId, title = "") {
+  let normalized = decodeEntities(title || "");
+
+  if (sourceId === "sports_orange") {
+    // Orange prepends presentation metadata that changes as an item ages:
+    // "19:09 Football …" later becomes "02/09 Football …".
+    // It is not editorial content and must not affect the article hash.
+    normalized = normalized.replace(
+      /^(?:(?:[01]?\d|2[0-3]):[0-5]\d|\d{2}\/\d{2})\s+Football\s+/i,
+      ""
+    );
+  }
+
+  if (sourceId === "madeingones") {
+    // MadeInGones appends a relative presentation timestamp to cards:
+    // "OL • 15h45" later becomes "OL • 02/09".
+    normalized = normalized.replace(
+      /\s*•\s*(?:(?:[01]?\d|2[0-3])h[0-5]\d|\d{2}\/\d{2})\s*$/i,
+      ""
+    );
+
+    // Some cards repeat the section label in their metadata.
+    normalized = normalized.replace(
+      /\b(Mercato|Ligue 1|Ligue 2|Ligue Europa|Ligue des Champions|Anciens|OL)\s*•\s*\1\b/gi,
+      "$1"
+    );
+  }
+
+  return normalized.replace(/\s+/g, " ").trim();
+}
+
 function absoluteUrl(href, base) {
   try {
     return new URL(href, base).toString();
@@ -293,7 +324,7 @@ async function upsertArticles(db, sourceId, items, now) {
   if (!items.length) return { inserted: 0, updated: 0, unchanged: 0 };
 
   const prepared = await Promise.all(items.map(async (item) => {
-    const normalizedTitle = decodeEntities(item.title || "");
+    const normalizedTitle = normalizeSourceTitle(sourceId, item.title || "");
     const normalizedExcerpt = decodeEntities(item.excerpt || "");
     const publishedAt = item.publishedAt || null;
     const discoveryMethod = item.discoveryMethod || "html_links";
