@@ -1,0 +1,122 @@
+name: Audit hash instability now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hash-instability-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit changing article hashes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch hash instability samples
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+
+          for source in madeingones sports_orange; do
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/hash-instability-audit?source=$source&limit=50" \
+              -o "audit/$source.json"
+          done
+
+      - name: Analyze changed fields
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for source in ("madeingones", "sports_orange"):
+              data = json.loads(Path("audit/" + source + ".json").read_text(encoding="utf-8"))
+              print("=== " + source + " ===")
+              print("articles_with_multiple_versions=" + str(data.get("count", 0)))
+
+              for item in data.get("items", [])[:20]:
+                  versions = item.get("versions", [])
+                  if len(versions) < 2:
+                      continue
+
+                  newest, previous = versions[0], versions[1]
+                  title_changed = (newest.get("title") or "") != (previous.get("title") or "")
+                  excerpt_changed = (newest.get("excerpt") or "") != (previous.get("excerpt") or "")
+
+                  print("---")
+                  print(item.get("url"))
+                  print("version_count=" + str(item.get("version_count")))
+                  print("title_changed=" + str(title_changed))
+                  print("excerpt_changed=" + str(excerpt_changed))
+                  print("newest_at=" + str(newest.get("captured_at")))
+                  print("previous_at=" + str(previous.get("captured_at")))
+
+                  if title_changed:
+                      print("TITLE OLD:", previous.get("title"))
+                      print("TITLE NEW:", newest.get("title"))
+
+                  if excerpt_changed:
+                      print("EXCERPT OLD:", previous.get("excerpt"))
+                      print("EXCERPT NEW:", newest.get("excerpt"))
+              print()
+          PY
+
+      - name: Write GitHub job summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          print("# Club Actu — hash instability audit")
+          print()
+
+          for source in ("madeingones", "sports_orange"):
+              data = json.loads(Path("audit/" + source + ".json").read_text(encoding="utf-8"))
+              items = data.get("items", [])
+              title_only = 0
+              excerpt_only = 0
+              both = 0
+              neither = 0
+
+              for item in items:
+                  versions = item.get("versions", [])
+                  if len(versions) < 2:
+                      continue
+                  newest, previous = versions[0], versions[1]
+                  t = (newest.get("title") or "") != (previous.get("title") or "")
+                  e = (newest.get("excerpt") or "") != (previous.get("excerpt") or "")
+                  if t and e:
+                      both += 1
+                  elif t:
+                      title_only += 1
+                  elif e:
+                      excerpt_only += 1
+                  else:
+                      neither += 1
+
+              print("## " + source)
+              print("- Multiple-version articles: **" + str(len(items)) + "**")
+              print("- Title only changed: **" + str(title_only) + "**")
+              print("- Excerpt only changed: **" + str(excerpt_only) + "**")
+              print("- Both changed: **" + str(both) + "**")
+              print("- Same title/excerpt despite new hash: **" + str(neither) + "**")
+              print()
+
+              for item in items[:8]:
+                  versions = item.get("versions", [])
+                  if len(versions) < 2:
+                      continue
+                  newest, previous = versions[0], versions[1]
+                  print("- " + str(item.get("url")))
+                  if (newest.get("title") or "") != (previous.get("title") or ""):
+                      print("  - title changed")
+                  if (newest.get("excerpt") or "") != (previous.get("excerpt") or ""):
+                      print("  - excerpt changed")
+              print()
+          PY
