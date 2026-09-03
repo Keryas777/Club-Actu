@@ -503,6 +503,7 @@ async function loadCandidates(db, limit) {
     `SELECT r.*
      FROM raw_articles r
      WHERE r.content_hash IS NOT NULL
+       AND r.processing_status IN ('raw', 'phase_a_retry')
        AND (
          NOT EXISTS (
            SELECT 1 FROM article_extractions e

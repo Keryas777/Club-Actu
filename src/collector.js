@@ -404,7 +404,8 @@ async function upsertArticles(db, sourceId, items, now) {
       db.prepare(
         `UPDATE raw_articles SET
            last_seen_at = ?, title = ?, published_at = COALESCE(?, published_at),
-           excerpt = COALESCE(?, excerpt), discovery_method = ?, content_hash = ?
+           excerpt = COALESCE(?, excerpt), discovery_method = ?, content_hash = ?,
+           processing_status = 'raw'
          WHERE id = ?`
       ).bind(
         now, item.normalizedTitle, item.publishedAt,
