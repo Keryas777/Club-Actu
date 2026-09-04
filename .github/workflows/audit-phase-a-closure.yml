@@ -1,0 +1,196 @@
+name: Audit Phase A closure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-a-closure-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit OL PSG OM Phase A
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Worker diagnostics
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+
+          curl --fail-with-body --silent --show-error "$BASE_URL/health" -o health.json
+          curl --fail-with-body --silent --show-error "$BASE_URL/api/collection-audit?limit=20" -o collection-audit.json
+
+          for club in ol psg om; do
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/processing-status?club=$club&limit=20" \
+              -o "processing-$club.json"
+
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/relevance-audit?club=$club&limit=50&compact=1" \
+              -o "relevance-$club.json"
+
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/phase-b-preview?club=$club&limit=60&pairs=20" \
+              -o "phase-b-$club.json"
+          done
+
+      - name: Print raw diagnostics
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in [
+              Path('health.json'),
+              Path('collection-audit.json'),
+              *[Path(f'processing-{club}.json') for club in ('ol','psg','om')],
+              *[Path(f'relevance-{club}.json') for club in ('ol','psg','om')],
+              *[Path(f'phase-b-{club}.json') for club in ('ol','psg','om')],
+          ]:
+              print(f'\n===== {path.name} =====')
+              with path.open(encoding='utf-8') as f:
+                  print(json.dumps(json.load(f), ensure_ascii=False, indent=2))
+          PY
+
+      - name: Write Phase A closure summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          clubs = [('ol', 'OL'), ('psg', 'PSG'), ('om', 'OM')]
+
+          def load(path):
+              with open(path, encoding='utf-8') as f:
+                  return json.load(f)
+
+          def val(data, *keys, default=0):
+              cur = data
+              for key in keys:
+                  if not isinstance(cur, dict) or key not in cur:
+                      return default
+                  cur = cur[key]
+              return cur
+
+          health = load('health.json')
+          collection = load('collection-audit.json')
+          latest = collection.get('latest_run') or {}
+          details = latest.get('source_details') or []
+          source_ok = sum(1 for row in details if isinstance(row, dict) and row.get('ok'))
+          source_total = len([row for row in details if isinstance(row, dict)])
+          source_errors = [row for row in details if isinstance(row, dict) and not row.get('ok')]
+
+          print('# Club Actu — Phase A closure audit')
+          print()
+          print('## Infrastructure / collection')
+          print()
+          print(f"- Worker health: **{'OK' if health.get('ok') else 'ERROR'}**")
+          print(f"- Latest collection: **{latest.get('status', 'unknown')}**")
+          print(f"- Sources OK: **{source_ok}/{source_total}**")
+          print(f"- Source errors: **{len(source_errors)}**")
+          print(f"- Collection started: `{latest.get('started_at')}`")
+          print(f"- Collection finished: `{latest.get('finished_at')}`")
+          print()
+
+          print('## Phase A by club')
+          print()
+          print('| Club | processing status | relevant | rejected | needs_review | retry | failed |')
+          print('|---|---|---:|---:|---:|---:|---:|')
+
+          data_by_club = {}
+          for club, label in clubs:
+              p = load(f'processing-{club}.json')
+              data_by_club[club] = p
+
+              # The endpoint has evolved during Phase A. Accept the common shapes
+              # instead of making this audit brittle to a cosmetic JSON rename.
+              counts = p.get('counts') or p.get('totals') or p.get('summary') or p
+              relevant = counts.get('relevant', counts.get('phase_a_ready', '—')) if isinstance(counts, dict) else '—'
+              rejected = counts.get('rejected', counts.get('phase_a_rejected', '—')) if isinstance(counts, dict) else '—'
+              review = counts.get('needs_review', counts.get('phase_a_review', '—')) if isinstance(counts, dict) else '—'
+              retry = counts.get('retry', counts.get('phase_a_retry', '—')) if isinstance(counts, dict) else '—'
+              failed = counts.get('failed', '—') if isinstance(counts, dict) else '—'
+              status = p.get('status') or p.get('processing_status') or ('ok' if p.get('ok') else 'unknown')
+
+              print(f'| {label} | {status} | {relevant} | {rejected} | {review} | {retry} | {failed} |')
+
+          print()
+          print('## Current review / diagnostic payloads')
+          print()
+          for club, label in clubs:
+              p = data_by_club[club]
+              print(f'### {label}')
+              print()
+
+              reason_counts = p.get('reason_counts') or p.get('decision_counts') or []
+              status_counts = p.get('status_counts') or p.get('processing_status_counts') or []
+              examples = p.get('examples') or p.get('recent') or p.get('articles') or []
+
+              if status_counts:
+                  print('Processing/status counts:')
+                  print('```json')
+                  print(json.dumps(status_counts, ensure_ascii=False, indent=2))
+                  print('```')
+              if reason_counts:
+                  print('Reason/decision counts:')
+                  print('```json')
+                  print(json.dumps(reason_counts, ensure_ascii=False, indent=2))
+                  print('```')
+              if examples:
+                  print('Recent examples (first 10):')
+                  print('```json')
+                  print(json.dumps(examples[:10] if isinstance(examples, list) else examples, ensure_ascii=False, indent=2))
+                  print('```')
+              if not status_counts and not reason_counts and not examples:
+                  print('Full compact payload:')
+                  print('```json')
+                  print(json.dumps(p, ensure_ascii=False, indent=2))
+                  print('```')
+              print()
+
+          print('## Relevance-audit samples')
+          print()
+          for club, label in clubs:
+              r = load(f'relevance-{club}.json')
+              print(f'### {label}')
+              print()
+              print('```json')
+              print(json.dumps(r, ensure_ascii=False, indent=2))
+              print('```')
+              print()
+
+          print('## Phase B readiness preview')
+          print()
+          for club, label in clubs:
+              b = load(f'phase-b-{club}.json')
+              print(f'### {label}')
+              print()
+              # Keep this short in the summary; full payload remains in logs.
+              compact = {
+                  key: b.get(key)
+                  for key in ('club_id', 'article_count', 'pair_count', 'strong_count', 'candidate_count')
+                  if key in b
+              }
+              if not compact:
+                  compact = {k: v for k, v in b.items() if k != 'pairs'}
+              print('```json')
+              print(json.dumps(compact, ensure_ascii=False, indent=2))
+              print('```')
+              print()
+
+          print('## Closure checklist')
+          print()
+          print('- [ ] Latest collection healthy (expected 13/13, 0 errors)')
+          print('- [ ] No abnormal Phase A retry/failed backlog')
+          print('- [ ] OL relevant/rejected/review distribution plausible')
+          print('- [ ] PSG relevant/rejected/review distribution plausible')
+          print('- [ ] OM relevant/rejected/review distribution plausible')
+          print('- [ ] Review samples show no obvious systematic false positives')
+          print('- [ ] Role-classifier leftovers are bounded / explainable')
+          print('- [ ] Phase B receives a usable relevant corpus for all three clubs')
+          PY
