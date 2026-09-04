@@ -1,0 +1,138 @@
+name: Repair Phase A residuals
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-a-residual-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    name: Drain residual Phase A reviews
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repair terminal retries stale statuses and residual reviews
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          : > repair-results.jsonl
+
+          for batch in $(seq 1 25); do
+            body="$(mktemp)"
+            status="$(
+              curl --silent --show-error \
+                --output "$body" \
+                --write-out '%{http_code}' \
+                --request POST \
+                --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+                --header "Accept: application/json" \
+                "$BASE_URL/api/repair-phase-a-residuals?roles=8"
+            )"
+
+            echo "===== batch $batch — HTTP $status ====="
+            cat "$body"
+            echo
+
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Residual repair failed with HTTP $status"
+              exit 1
+            fi
+
+            cat "$body" >> repair-results.jsonl
+            printf '\n' >> repair-results.jsonl
+
+            remaining="$(python3 - "$body" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    payload = json.load(f)
+print(int(payload.get('remaining_role_queue') or 0))
+PY
+)"
+
+            echo "Residual role queue remaining: $remaining"
+            rm -f "$body"
+
+            if [ "$remaining" -eq 0 ]; then
+              break
+            fi
+          done
+
+          curl --fail-with-body --silent --show-error \
+            "$BASE_URL/api/phase-a-closure-status" \
+            -o closure-after-repair.json
+
+      - name: Write repair summary
+        run: |
+          set -o pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+
+          batches = []
+          with open('repair-results.jsonl', encoding='utf-8') as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      batches.append(json.loads(line))
+
+          with open('closure-after-repair.json', encoding='utf-8') as f:
+              closure = json.load(f)
+
+          totals = {
+              'terminalized': 0,
+              'direct_promoted': 0,
+              'non_football_rejected': 0,
+              'stale_reconciled': 0,
+              'role_processed': 0,
+              'role_relevant': 0,
+              'role_rejected': 0,
+              'role_needs_review': 0,
+              'role_errors': 0,
+          }
+
+          for batch in batches:
+              totals['terminalized'] += int((batch.get('terminal') or {}).get('terminalized') or 0)
+              totals['direct_promoted'] += int((batch.get('direct') or {}).get('promoted') or 0)
+              totals['non_football_rejected'] += int((batch.get('non_football') or {}).get('rejected') or 0)
+              totals['stale_reconciled'] += int((batch.get('stale_before') or {}).get('reconciled') or 0)
+              totals['stale_reconciled'] += int((batch.get('stale_after') or {}).get('reconciled') or 0)
+              roles = batch.get('roles') or {}
+              totals['role_processed'] += int(roles.get('processed') or 0)
+              totals['role_relevant'] += int(roles.get('relevant') or 0)
+              totals['role_rejected'] += int(roles.get('rejected') or 0)
+              totals['role_needs_review'] += int(roles.get('needs_review') or 0)
+              totals['role_errors'] += int(roles.get('errors') or 0)
+
+          remaining = int((batches[-1] if batches else {}).get('remaining_role_queue') or 0)
+
+          print('# Club Actu — Phase A residual repair')
+          print()
+          print(f'- Batches: **{len(batches)}**')
+          print(f'- Terminal 404/410 retries closed: **{totals["terminalized"]}**')
+          print(f'- Direct-source short-content reviews promoted: **{totals["direct_promoted"]}**')
+          print(f'- Obvious non-football reviews rejected: **{totals["non_football_rejected"]}**')
+          print(f'- Stale processing statuses reconciled: **{totals["stale_reconciled"]}**')
+          print(f'- Residual role reviews processed: **{totals["role_processed"]}**')
+          print(f'  - relevant: **{totals["role_relevant"]}**')
+          print(f'  - rejected: **{totals["role_rejected"]}**')
+          print(f'  - still review: **{totals["role_needs_review"]}**')
+          print(f'  - provider errors: **{totals["role_errors"]}**')
+          print(f'- Residual role queue remaining: **{remaining}**')
+          print()
+          print('## Closure status after repair')
+          print('```json')
+          print(json.dumps(closure, ensure_ascii=False, indent=2))
+          print('```')
+          PY
