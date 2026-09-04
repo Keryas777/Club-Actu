@@ -1,0 +1,283 @@
+name: Audit Phase A backlog
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-a-backlog-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Explain waiting retry and review backlog
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Query remote D1 backlog
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          npx wrangler d1 execute DB --remote --json --command "
+            SELECT
+              r.id,
+              r.source_id,
+              r.title,
+              r.canonical_url AS url,
+              r.processing_status,
+              r.last_seen_at,
+              CASE
+                WHEN NOT EXISTS (
+                  SELECT 1
+                  FROM article_extractions e
+                  WHERE e.article_id = r.id
+                    AND e.source_content_hash = r.content_hash
+                    AND e.extractor_version = 'phase-a-extractor-v1'
+                ) THEN 'missing_extraction'
+                WHEN EXISTS (
+                  SELECT 1
+                  FROM article_extractions e
+                  WHERE e.article_id = r.id
+                    AND e.source_content_hash = r.content_hash
+                    AND e.extractor_version = 'phase-a-extractor-v1'
+                    AND e.status = 'retry'
+                    AND (e.retry_after IS NULL OR e.retry_after <= datetime('now'))
+                ) THEN 'retry_due'
+                WHEN EXISTS (
+                  SELECT 1
+                  FROM article_extractions e
+                  WHERE e.article_id = r.id
+                    AND e.source_content_hash = r.content_hash
+                    AND e.extractor_version = 'phase-a-extractor-v1'
+                    AND e.status = 'retry'
+                    AND e.retry_after > datetime('now')
+                ) THEN 'retry_not_due'
+                WHEN EXISTS (
+                  SELECT 1
+                  FROM article_extractions e
+                  WHERE e.article_id = r.id
+                    AND e.source_content_hash = r.content_hash
+                    AND e.extractor_version = 'phase-a-extractor-v1'
+                    AND e.status = 'completed'
+                )
+                AND EXISTS (
+                  SELECT 1
+                  FROM club_sources cs
+                  JOIN clubs c ON c.id = cs.club_id AND c.active = 1
+                  WHERE cs.source_id = r.source_id
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM article_club_assessments a
+                      WHERE a.article_id = r.id
+                        AND a.club_id = cs.club_id
+                        AND a.source_content_hash = r.content_hash
+                        AND a.rule_version = 'phase-a-relevance-v3'
+                    )
+                ) THEN 'missing_assessment'
+                ELSE 'stale_processing_status'
+              END AS backlog_cause
+            FROM raw_articles r
+            WHERE r.content_hash IS NOT NULL
+              AND r.processing_status IN ('raw', 'phase_a_retry')
+            ORDER BY backlog_cause, r.last_seen_at ASC;
+          " > waiting.json
+
+          npx wrangler d1 execute DB --remote --json --command "
+            SELECT
+              r.id,
+              r.source_id,
+              r.title,
+              r.canonical_url AS url,
+              r.processing_status,
+              e.status AS extraction_status,
+              e.error_code,
+              e.error_detail,
+              e.retry_after,
+              e.updated_at
+            FROM article_extractions e
+            JOIN raw_articles r
+              ON r.id = e.article_id
+             AND r.content_hash = e.source_content_hash
+            WHERE e.extractor_version = 'phase-a-extractor-v1'
+              AND e.status IN ('retry', 'failed')
+            ORDER BY e.updated_at DESC;
+          " > retries.json
+
+          npx wrangler d1 execute DB --remote --json --command "
+            SELECT
+              a.club_id,
+              r.id AS article_id,
+              r.source_id,
+              r.title,
+              r.canonical_url AS url,
+              a.reason_code,
+              a.reason_detail,
+              a.decided_at,
+              rc.status AS role_status,
+              rc.role,
+              rc.confidence,
+              rc.rationale,
+              rc.provider_model,
+              rc.error_code AS role_error_code,
+              rc.error_detail AS role_error_detail
+            FROM article_club_assessments a
+            JOIN raw_articles r
+              ON r.id = a.article_id
+             AND r.content_hash = a.source_content_hash
+            LEFT JOIN article_club_role_classifications rc
+              ON rc.article_id = a.article_id
+             AND rc.club_id = a.club_id
+             AND rc.source_content_hash = a.source_content_hash
+            WHERE a.rule_version = 'phase-a-relevance-v3'
+              AND a.decision = 'needs_review'
+              AND a.club_id IN ('ol', 'psg', 'om')
+            ORDER BY a.club_id, a.reason_code, a.decided_at ASC;
+          " > reviews.json
+
+      - name: Write forensic summary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter, defaultdict
+
+          def rows(path):
+              with open(path, encoding='utf-8') as f:
+                  payload = json.load(f)
+              out = []
+              if isinstance(payload, list):
+                  for block in payload:
+                      if isinstance(block, dict):
+                          out.extend(block.get('results') or [])
+              elif isinstance(payload, dict):
+                  out.extend(payload.get('results') or [])
+              return out
+
+          waiting = rows('waiting.json')
+          retries = rows('retries.json')
+          reviews = rows('reviews.json')
+
+          waiting_causes = Counter(row.get('backlog_cause') or 'unknown' for row in waiting)
+          actionable_causes = {'missing_extraction', 'retry_due', 'missing_assessment'}
+          actionable = [row for row in waiting if row.get('backlog_cause') in actionable_causes]
+          stale = [row for row in waiting if row.get('backlog_cause') == 'stale_processing_status']
+          not_due = [row for row in waiting if row.get('backlog_cause') == 'retry_not_due']
+
+          print('# Club Actu — Phase A backlog forensics')
+          print()
+          print('## 1. waiting / processing_status')
+          print()
+          print(f'- Rows marked `raw` / `phase_a_retry`: **{len(waiting)}**')
+          print(f'- Actually actionable now: **{len(actionable)}**')
+          print(f'- Stale processing status only: **{len(stale)}**')
+          print(f'- Retry scheduled but not due yet: **{len(not_due)}**')
+          print()
+          print('| Cause | Count |')
+          print('|---|---:|')
+          for cause, count in sorted(waiting_causes.items(), key=lambda item: (-item[1], item[0])):
+              print(f'| `{cause}` | {count} |')
+          print()
+
+          if waiting:
+              print('### All waiting/status rows')
+              print('```json')
+              print(json.dumps(waiting, ensure_ascii=False, indent=2))
+              print('```')
+              print()
+
+          print('## 2. extraction retry / failed')
+          print()
+          print(f'- Current retry/failed extractions: **{len(retries)}**')
+          print('```json')
+          print(json.dumps(retries, ensure_ascii=False, indent=2))
+          print('```')
+          print()
+
+          print('## 3. needs_review — complete audit')
+          print()
+          print(f'- Current OL + PSG + OM needs_review rows: **{len(reviews)}**')
+          print()
+
+          by_club = Counter(row.get('club_id') or 'unknown' for row in reviews)
+          by_reason = Counter((row.get('club_id') or 'unknown', row.get('reason_code') or 'unspecified') for row in reviews)
+          by_source = Counter((row.get('club_id') or 'unknown', row.get('source_id') or 'unknown') for row in reviews)
+
+          print('| Club | Count |')
+          print('|---|---:|')
+          for club in ('ol', 'psg', 'om'):
+              print(f'| {club.upper()} | {by_club.get(club, 0)} |')
+          print()
+
+          print('### Reasons')
+          print('| Club | Reason | Count |')
+          print('|---|---|---:|')
+          for (club, reason), count in sorted(by_reason.items(), key=lambda item: (item[0][0], -item[1], item[0][1])):
+              print(f'| {club.upper()} | `{reason}` | {count} |')
+          print()
+
+          print('### Sources')
+          print('| Club | Source | Count |')
+          print('|---|---|---:|')
+          for (club, source), count in sorted(by_source.items(), key=lambda item: (item[0][0], -item[1], item[0][1])):
+              print(f'| {club.upper()} | `{source}` | {count} |')
+          print()
+
+          normalized = []
+          for row in reviews:
+              detail = {}
+              try:
+                  detail = json.loads(row.get('reason_detail') or '{}')
+              except Exception:
+                  pass
+              normalized.append({
+                  'club_id': row.get('club_id'),
+                  'article_id': row.get('article_id'),
+                  'source_id': row.get('source_id'),
+                  'title': row.get('title'),
+                  'url': row.get('url'),
+                  'reason_code': row.get('reason_code'),
+                  'matched_alias': detail.get('matched_alias'),
+                  'matched_field': detail.get('matched_field'),
+                  'match_context': detail.get('match_context'),
+                  'role_status': row.get('role_status'),
+                  'role': row.get('role'),
+                  'confidence': row.get('confidence'),
+                  'rationale': row.get('rationale'),
+                  'role_error_code': row.get('role_error_code'),
+              })
+
+          print('### Every remaining review row')
+          print('```json')
+          print(json.dumps(normalized, ensure_ascii=False, indent=2))
+          print('```')
+          print()
+
+          print('## Interpretation gate')
+          print()
+          if actionable:
+              print(f'- ❌ **{len(actionable)} actionable Phase A rows remain.** They must be processed or fixed before closure.')
+          else:
+              print('- ✅ **No actually actionable waiting row remains.** Any non-zero closure `waiting` based only on `processing_status` is stale bookkeeping.')
+          if retries:
+              print(f'- ⚠️ **{len(retries)} retry/failed extraction row(s)** require a concrete source/error decision.')
+          else:
+              print('- ✅ No retry/failed extraction remains.')
+          print(f'- ℹ️ **{len(reviews)} needs_review rows** are fully enumerated above for semantic classification by cause.')
+          PY
