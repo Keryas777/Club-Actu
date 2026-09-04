@@ -1,6 +1,7 @@
 import { collectAll, repairMojibake, normalizeStoredEntities } from "./collector.js";
 import { drainPhaseA, drainRoleClassifier, getProcessingDiagnostics, getRelevanceAudit, getRelevanceV3Preview, runRoleClassifierPreview } from "./processor.js";
 import { getPhaseBPreview } from "./grouper.js";
+import { cleanEditorialText } from "./text-cleanup.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -25,9 +26,222 @@ function bearerToken(request) {
   return match ? match[1] : null;
 }
 
+function knownNoiseSql(alias = "e") {
+  const fields = ["normalized_title", "normalized_excerpt", "normalized_content"];
+  const patterns = [
+    "%&#%",
+    "%&amp;%",
+    "%&rsquo;%",
+    "%&lsquo;%",
+    "%&rdquo;%",
+    "%&ldquo;%",
+    "%&hellip;%",
+    "%&ndash;%",
+    "%&mdash;%",
+    "%&eacute;%",
+    "%&egrave;%",
+    "%&agrave;%",
+    "%&ccedil;%",
+    "%The post%first appeared on But! Football Club%",
+    "%pour lire la suite, rejoignez notre communauté d'abonnés%",
+    "%Ce contenu est bloqué car vous n'avez pas accepté les cookies%",
+    "%{'skus':%"
+  ];
+
+  const clauses = [];
+  const bindings = [];
+  for (const field of fields) {
+    for (const pattern of patterns) {
+      clauses.push(`${alias}.${field} LIKE ?`);
+      bindings.push(pattern);
+    }
+  }
+  return { sql: `(${clauses.join(" OR ")})`, bindings };
+}
+
+async function cleanStoredPhaseAText(db, options = {}) {
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
+  const historical = Boolean(options.historical);
+  const noise = knownNoiseSql("e");
+  const recentClause = historical ? "" : " AND e.updated_at >= ?";
+  const recentBinding = historical
+    ? []
+    : [new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()];
+
+  const { results } = await db.prepare(
+    `SELECT e.id, r.source_id,
+            e.normalized_title, e.normalized_author,
+            e.normalized_excerpt, e.normalized_content
+     FROM article_extractions e
+     JOIN raw_articles r ON r.id = e.article_id
+     WHERE e.status = 'completed'
+       AND ${noise.sql}
+       ${recentClause}
+     ORDER BY e.updated_at ASC
+     LIMIT ?`
+  ).bind(...noise.bindings, ...recentBinding, limit).all();
+
+  let updated = 0;
+  const examples = [];
+  for (const row of results || []) {
+    const title = cleanEditorialText(row.normalized_title, row.source_id) || null;
+    const author = cleanEditorialText(row.normalized_author, row.source_id) || null;
+    const excerpt = cleanEditorialText(row.normalized_excerpt, row.source_id) || null;
+    const content = cleanEditorialText(row.normalized_content, row.source_id) || null;
+
+    if (
+      title === row.normalized_title &&
+      author === row.normalized_author &&
+      excerpt === row.normalized_excerpt &&
+      content === row.normalized_content
+    ) {
+      continue;
+    }
+
+    await db.prepare(
+      `UPDATE article_extractions
+       SET normalized_title = ?, normalized_author = ?,
+           normalized_excerpt = ?, normalized_content = ?, updated_at = ?
+       WHERE id = ?`
+    ).bind(title, author, excerpt, content, new Date().toISOString(), row.id).run();
+    updated++;
+
+    if (examples.length < 8) {
+      examples.push({ id: row.id, source_id: row.source_id, title });
+    }
+  }
+
+  const remainingRow = await db.prepare(
+    `SELECT COUNT(*) AS n
+     FROM article_extractions e
+     WHERE e.status = 'completed'
+       AND ${noise.sql}
+       ${recentClause}`
+  ).bind(...noise.bindings, ...recentBinding).first();
+
+  return {
+    historical,
+    scanned: (results || []).length,
+    updated,
+    remaining: Number(remainingRow?.n || 0),
+    examples
+  };
+}
+
+async function getPhaseAClosureStatus(db) {
+  const clubs = ["ol", "psg", "om"];
+  const byClub = {};
+
+  for (const clubId of clubs) {
+    const counts = await db.prepare(
+      `SELECT
+         SUM(CASE WHEN a.decision = 'relevant' THEN 1 ELSE 0 END) AS relevant,
+         SUM(CASE WHEN a.decision = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+         SUM(CASE WHEN a.decision = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
+         SUM(CASE WHEN a.decision = 'needs_review' AND a.reason_code IN (
+           'strong_alias_excerpt_role_review', 'strong_alias_lead_role_review'
+         ) THEN 1 ELSE 0 END) AS role_queue_pending
+       FROM article_club_assessments a
+       JOIN raw_articles r ON r.id = a.article_id AND r.content_hash = a.source_content_hash
+       WHERE a.club_id = ?
+         AND a.rule_version = 'phase-a-relevance-v3'`
+    ).bind(clubId).first();
+
+    const extraction = await db.prepare(
+      `SELECT
+         COUNT(DISTINCT CASE WHEN e.status = 'retry' THEN r.id END) AS retry,
+         COUNT(DISTINCT CASE WHEN e.status = 'failed' THEN r.id END) AS failed
+       FROM raw_articles r
+       JOIN club_sources cs ON cs.source_id = r.source_id AND cs.club_id = ?
+       JOIN article_extractions e
+         ON e.article_id = r.id
+        AND e.source_content_hash = r.content_hash
+       WHERE r.content_hash IS NOT NULL`
+    ).bind(clubId).first();
+
+    const waiting = await db.prepare(
+      `SELECT COUNT(DISTINCT r.id) AS n
+       FROM raw_articles r
+       JOIN club_sources cs ON cs.source_id = r.source_id AND cs.club_id = ?
+       WHERE r.processing_status IN ('raw', 'phase_a_retry')`
+    ).bind(clubId).first();
+
+    const roleErrors = await db.prepare(
+      `SELECT COUNT(*) AS n
+       FROM article_club_assessments a
+       JOIN raw_articles r ON r.id = a.article_id AND r.content_hash = a.source_content_hash
+       WHERE a.club_id = ?
+         AND a.rule_version = 'phase-a-relevance-v3'
+         AND a.decision = 'needs_review'
+         AND a.reason_code IN ('strong_alias_excerpt_role_review', 'strong_alias_lead_role_review')
+         AND EXISTS (
+           SELECT 1
+           FROM article_club_role_classifications rc
+           WHERE rc.article_id = a.article_id
+             AND rc.club_id = a.club_id
+             AND rc.source_content_hash = a.source_content_hash
+             AND rc.status = 'error'
+         )`
+    ).bind(clubId).first();
+
+    const { results: reviewReasons } = await db.prepare(
+      `SELECT COALESCE(a.reason_code, 'unspecified') AS reason_code, COUNT(*) AS count
+       FROM article_club_assessments a
+       JOIN raw_articles r ON r.id = a.article_id AND r.content_hash = a.source_content_hash
+       WHERE a.club_id = ?
+         AND a.rule_version = 'phase-a-relevance-v3'
+         AND a.decision = 'needs_review'
+       GROUP BY COALESCE(a.reason_code, 'unspecified')
+       ORDER BY count DESC, reason_code ASC`
+    ).bind(clubId).all();
+
+    const retry = Number(extraction?.retry || 0);
+    const failed = Number(extraction?.failed || 0);
+    const waitingCount = Number(waiting?.n || 0);
+    const roleQueuePending = Number(counts?.role_queue_pending || 0);
+    const roleClassifierErrors = Number(roleErrors?.n || 0);
+
+    byClub[clubId] = {
+      status: retry || failed || waitingCount || roleQueuePending || roleClassifierErrors ? "attention" : "ok",
+      relevant: Number(counts?.relevant || 0),
+      rejected: Number(counts?.rejected || 0),
+      needs_review: Number(counts?.needs_review || 0),
+      retry,
+      failed,
+      waiting: waitingCount,
+      role_queue_pending: roleQueuePending,
+      role_classifier_errors: roleClassifierErrors,
+      review_reasons: reviewReasons || []
+    };
+  }
+
+  const noise = knownNoiseSql("e");
+  const noisyTotal = await db.prepare(
+    `SELECT COUNT(*) AS n
+     FROM article_extractions e
+     WHERE e.status = 'completed' AND ${noise.sql}`
+  ).bind(...noise.bindings).first();
+
+  const { results: noisyBySource } = await db.prepare(
+    `SELECT r.source_id, COUNT(*) AS count
+     FROM article_extractions e
+     JOIN raw_articles r ON r.id = e.article_id
+     WHERE e.status = 'completed' AND ${noise.sql}
+     GROUP BY r.source_id
+     ORDER BY count DESC, r.source_id ASC`
+  ).bind(...noise.bindings).all();
+
+  return {
+    clubs: byClub,
+    text_cleanup: {
+      known_noise_remaining: Number(noisyTotal?.n || 0),
+      by_source: noisyBySource || []
+    }
+  };
+}
+
 async function handleApi(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
-
 
   if (url.pathname === "/api/debug/encoding" && request.method === "GET") {
     const samples = [
@@ -50,7 +264,6 @@ async function handleApi(request, env, url) {
       })
     });
   }
-
 
   if (url.pathname === "/api/collection-audit" && request.method === "GET") {
     const limit = parseLimit(url, 20, 100);
@@ -119,6 +332,29 @@ async function handleApi(request, env, url) {
     return json({ ok: true, trigger: "normalize_stored_text", ...result });
   }
 
+  if (url.pathname === "/api/clean-phase-a-text" && request.method === "POST") {
+    if (!env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+    }
+
+    const token = bearerToken(request);
+    if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+      return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const historical = ["1", "true", "yes"].includes(
+      (url.searchParams.get("historical") || "").trim().toLowerCase()
+    );
+    const limit = parseLimit(url, 100, 100);
+    const result = await cleanStoredPhaseAText(env.DB, { limit, historical });
+    return json({ ok: true, trigger: "clean_phase_a_text", ...result });
+  }
+
+  if (url.pathname === "/api/phase-a-closure-status" && request.method === "GET") {
+    const result = await getPhaseAClosureStatus(env.DB);
+    return json({ ok: true, ...result });
+  }
+
   if (url.pathname === "/api/collect-now" && request.method === "POST") {
     if (!env.MANUAL_TRIGGER_TOKEN) {
       return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
@@ -144,12 +380,13 @@ async function handleApi(request, env, url) {
     }
 
     const deterministic = await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
+    const cleanup = await cleanStoredPhaseAText(env.DB, { limit: 25, historical: false });
     const roles = await drainRoleClassifier(env.DB, env, {
       maxItems: 10,
       maxDurationMs: 45000,
       interRequestDelayMs: 4000
     });
-    return json({ ok: true, trigger: "manual", deterministic, roles });
+    return json({ ok: true, trigger: "manual", deterministic, cleanup, roles });
   }
 
   if (url.pathname === "/api/relevance-role-preview" && request.method === "POST") {
@@ -363,6 +600,7 @@ export default {
     ctx.waitUntil((async () => {
       await collectAll(env.DB);
       await drainPhaseA(env.DB, { chunkSize: 25, maxDurationMs: 45000 });
+      await cleanStoredPhaseAText(env.DB, { limit: 25, historical: false });
       await drainRoleClassifier(env.DB, env, {
         maxItems: 10,
         maxDurationMs: 45000,

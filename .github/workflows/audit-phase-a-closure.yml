@@ -24,6 +24,7 @@ jobs:
 
           curl --fail-with-body --silent --show-error "$BASE_URL/health" -o health.json
           curl --fail-with-body --silent --show-error "$BASE_URL/api/collection-audit?limit=20" -o collection-audit.json
+          curl --fail-with-body --silent --show-error "$BASE_URL/api/phase-a-closure-status" -o closure-status.json
 
           for club in ol psg om; do
             curl --fail-with-body --silent --show-error \
@@ -48,6 +49,7 @@ jobs:
           for path in [
               Path('health.json'),
               Path('collection-audit.json'),
+              Path('closure-status.json'),
               *[Path(f'processing-{club}.json') for club in ('ol','psg','om')],
               *[Path(f'relevance-{club}.json') for club in ('ol','psg','om')],
               *[Path(f'phase-b-{club}.json') for club in ('ol','psg','om')],
@@ -62,7 +64,6 @@ jobs:
           set -o pipefail
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
-          from pathlib import Path
 
           clubs = [('ol', 'OL'), ('psg', 'PSG'), ('om', 'OM')]
 
@@ -70,21 +71,15 @@ jobs:
               with open(path, encoding='utf-8') as f:
                   return json.load(f)
 
-          def val(data, *keys, default=0):
-              cur = data
-              for key in keys:
-                  if not isinstance(cur, dict) or key not in cur:
-                      return default
-                  cur = cur[key]
-              return cur
-
           health = load('health.json')
           collection = load('collection-audit.json')
+          closure = load('closure-status.json')
           latest = collection.get('latest_run') or {}
           details = latest.get('source_details') or []
           source_ok = sum(1 for row in details if isinstance(row, dict) and row.get('ok'))
           source_total = len([row for row in details if isinstance(row, dict)])
           source_errors = [row for row in details if isinstance(row, dict) and not row.get('ok')]
+          closure_clubs = closure.get('clubs') or {}
 
           print('# Club Actu — Phase A closure audit')
           print()
@@ -98,80 +93,55 @@ jobs:
           print(f"- Collection finished: `{latest.get('finished_at')}`")
           print()
 
-          print('## Phase A by club')
+          print('## Phase A exact closure state')
           print()
-          print('| Club | processing status | relevant | rejected | needs_review | retry | failed |')
-          print('|---|---|---:|---:|---:|---:|---:|')
+          print('| Club | status | relevant | rejected | needs_review | retry | failed | waiting | role queue | role errors |')
+          print('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|')
+          for club, label in clubs:
+              row = closure_clubs.get(club) or {}
+              print(
+                  f"| {label} | {row.get('status', 'unknown')} | {row.get('relevant', 0)} | "
+                  f"{row.get('rejected', 0)} | {row.get('needs_review', 0)} | {row.get('retry', 0)} | "
+                  f"{row.get('failed', 0)} | {row.get('waiting', 0)} | {row.get('role_queue_pending', 0)} | "
+                  f"{row.get('role_classifier_errors', 0)} |"
+              )
+          print()
 
-          data_by_club = {}
+          print('## needs_review breakdown')
+          print()
+          for club, label in clubs:
+              row = closure_clubs.get(club) or {}
+              print(f'### {label}')
+              print('```json')
+              print(json.dumps(row.get('review_reasons') or [], ensure_ascii=False, indent=2))
+              print('```')
+              print()
+
+          print('## Stored text cleanliness')
+          print()
+          text_cleanup = closure.get('text_cleanup') or {}
+          print(f"- Known noisy extractions remaining: **{text_cleanup.get('known_noise_remaining', 0)}**")
+          print('```json')
+          print(json.dumps(text_cleanup.get('by_source') or [], ensure_ascii=False, indent=2))
+          print('```')
+          print()
+
+          print('## Current review examples')
+          print()
           for club, label in clubs:
               p = load(f'processing-{club}.json')
-              data_by_club[club] = p
-
-              # The endpoint has evolved during Phase A. Accept the common shapes
-              # instead of making this audit brittle to a cosmetic JSON rename.
-              counts = p.get('counts') or p.get('totals') or p.get('summary') or p
-              relevant = counts.get('relevant', counts.get('phase_a_ready', '—')) if isinstance(counts, dict) else '—'
-              rejected = counts.get('rejected', counts.get('phase_a_rejected', '—')) if isinstance(counts, dict) else '—'
-              review = counts.get('needs_review', counts.get('phase_a_review', '—')) if isinstance(counts, dict) else '—'
-              retry = counts.get('retry', counts.get('phase_a_retry', '—')) if isinstance(counts, dict) else '—'
-              failed = counts.get('failed', '—') if isinstance(counts, dict) else '—'
-              status = p.get('status') or p.get('processing_status') or ('ok' if p.get('ok') else 'unknown')
-
-              print(f'| {label} | {status} | {relevant} | {rejected} | {review} | {retry} | {failed} |')
-
-          print()
-          print('## Current review / diagnostic payloads')
-          print()
-          for club, label in clubs:
-              p = data_by_club[club]
-              print(f'### {label}')
-              print()
-
-              reason_counts = p.get('reason_counts') or p.get('decision_counts') or []
-              status_counts = p.get('status_counts') or p.get('processing_status_counts') or []
               examples = p.get('examples') or p.get('recent') or p.get('articles') or []
-
-              if status_counts:
-                  print('Processing/status counts:')
-                  print('```json')
-                  print(json.dumps(status_counts, ensure_ascii=False, indent=2))
-                  print('```')
-              if reason_counts:
-                  print('Reason/decision counts:')
-                  print('```json')
-                  print(json.dumps(reason_counts, ensure_ascii=False, indent=2))
-                  print('```')
-              if examples:
-                  print('Recent examples (first 10):')
-                  print('```json')
-                  print(json.dumps(examples[:10] if isinstance(examples, list) else examples, ensure_ascii=False, indent=2))
-                  print('```')
-              if not status_counts and not reason_counts and not examples:
-                  print('Full compact payload:')
-                  print('```json')
-                  print(json.dumps(p, ensure_ascii=False, indent=2))
-                  print('```')
-              print()
-
-          print('## Relevance-audit samples')
-          print()
-          for club, label in clubs:
-              r = load(f'relevance-{club}.json')
               print(f'### {label}')
-              print()
               print('```json')
-              print(json.dumps(r, ensure_ascii=False, indent=2))
+              print(json.dumps(examples[:10] if isinstance(examples, list) else examples, ensure_ascii=False, indent=2))
               print('```')
               print()
 
           print('## Phase B readiness preview')
           print()
+          phase_b_usable = True
           for club, label in clubs:
               b = load(f'phase-b-{club}.json')
-              print(f'### {label}')
-              print()
-              # Keep this short in the summary; full payload remains in logs.
               compact = {
                   key: b.get(key)
                   for key in ('club_id', 'article_count', 'pair_count', 'strong_count', 'candidate_count')
@@ -179,19 +149,33 @@ jobs:
               }
               if not compact:
                   compact = {k: v for k, v in b.items() if k != 'pairs'}
+              if int(b.get('article_count') or 0) <= 0:
+                  phase_b_usable = False
+              print(f'### {label}')
               print('```json')
               print(json.dumps(compact, ensure_ascii=False, indent=2))
               print('```')
               print()
 
+          collection_ok = bool(health.get('ok')) and latest.get('status') == 'success' and source_ok == 13 and source_total == 13 and not source_errors
+          queues_ok = all(
+              int((closure_clubs.get(club) or {}).get(key) or 0) == 0
+              for club, _ in clubs
+              for key in ('retry', 'failed', 'waiting', 'role_queue_pending', 'role_classifier_errors')
+          )
+          text_ok = int(text_cleanup.get('known_noise_remaining') or 0) == 0
+
+          def mark(ok):
+              return 'x' if ok else ' '
+
           print('## Closure checklist')
           print()
-          print('- [ ] Latest collection healthy (expected 13/13, 0 errors)')
-          print('- [ ] No abnormal Phase A retry/failed backlog')
-          print('- [ ] OL relevant/rejected/review distribution plausible')
-          print('- [ ] PSG relevant/rejected/review distribution plausible')
-          print('- [ ] OM relevant/rejected/review distribution plausible')
-          print('- [ ] Review samples show no obvious systematic false positives')
-          print('- [ ] Role-classifier leftovers are bounded / explainable')
-          print('- [ ] Phase B receives a usable relevant corpus for all three clubs')
+          print(f"- [{mark(collection_ok)}] Latest collection healthy (13/13, 0 errors)")
+          print(f"- [{mark(queues_ok)}] No retry/failed/waiting backlog and no unresolved role-classifier queue")
+          print('- [ ] OL relevant/rejected/review distribution plausible — manual semantic check')
+          print('- [ ] PSG relevant/rejected/review distribution plausible — manual semantic check')
+          print('- [ ] OM relevant/rejected/review distribution plausible — manual semantic check')
+          print('- [ ] Review samples show no obvious systematic false positives — manual semantic check')
+          print(f"- [{mark(text_ok)}] Known HTML entities / paywall / cookie / RSS boilerplate cleaned")
+          print(f"- [{mark(phase_b_usable)}] Phase B receives a usable relevant corpus for all three clubs")
           PY

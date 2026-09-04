@@ -1,0 +1,56 @@
+name: Clean Phase A text now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-a-text-cleanup-manual
+  cancel-in-progress: false
+
+jobs:
+  clean:
+    name: Clean stored Phase A text
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clean historical extractions
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          total_updated=0
+          remaining=-1
+
+          for i in $(seq 1 20); do
+            response=$(curl --fail-with-body --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer $TOKEN" \
+              "$BASE_URL/api/clean-phase-a-text?historical=1&limit=100")
+
+            echo "$response" | python3 -m json.tool
+
+            updated=$(echo "$response" | python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("updated", 0)))')
+            remaining=$(echo "$response" | python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("remaining", 0)))')
+            total_updated=$((total_updated + updated))
+
+            if [ "$remaining" -eq 0 ] || [ "$updated" -eq 0 ]; then
+              break
+            fi
+          done
+
+          {
+            echo "# Phase A stored text cleanup"
+            echo
+            echo "- Updated rows: **$total_updated**"
+            echo "- Known noisy rows remaining: **$remaining**"
+            if [ "$remaining" -gt 0 ]; then
+              echo "- Result: **partial** — rerun this workflow to continue."
+            else
+              echo "- Result: **clean**"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
