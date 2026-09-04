@@ -54,14 +54,7 @@ jobs:
             cat "$body" >> repair-results.jsonl
             printf '\n' >> repair-results.jsonl
 
-            remaining="$(python3 - "$body" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    payload = json.load(f)
-print(int(payload.get('remaining_role_queue') or 0))
-PY
-)"
-
+            remaining="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1], encoding="utf-8")).get("remaining_role_queue") or 0))' "$body")"
             echo "Residual role queue remaining: $remaining"
             rm -f "$body"
 
