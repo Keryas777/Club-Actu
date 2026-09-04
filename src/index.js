@@ -28,6 +28,9 @@ function bearerToken(request) {
 
 function knownNoiseSql(alias = "e") {
   const fields = ["normalized_title", "normalized_excerpt", "normalized_content"];
+  // Cloudflare D1 limits each LIKE/GLOB pattern to 50 bytes. Keep every
+  // diagnostic anchor deliberately short and let the JS cleaner apply the
+  // precise source-specific rules once a row has been selected.
   const patterns = [
     "%&#%",
     "%&amp;%",
@@ -42,9 +45,10 @@ function knownNoiseSql(alias = "e") {
     "%&egrave;%",
     "%&agrave;%",
     "%&ccedil;%",
-    "%The post%first appeared on But! Football Club%",
-    "%pour lire la suite, rejoignez notre communauté d'abonnés%",
-    "%Ce contenu est bloqué car vous n'avez pas accepté les cookies%",
+    "%The post%",
+    "%first appeared on But! Football Club%",
+    "%pour lire la suite%",
+    "%Ce contenu est bloqué%",
     "%{'skus':%"
   ];
 
