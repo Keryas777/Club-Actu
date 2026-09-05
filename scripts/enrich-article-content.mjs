@@ -73,7 +73,10 @@ async function fetchHtml(url) {
 }
 
 const now = new Date().toISOString();
-const statements = ['BEGIN TRANSACTION;'];
+// D1 remote execution through Wrangler rejects explicit SQL transaction
+// statements (BEGIN/COMMIT). Keep each UPSERT standalone and let Wrangler/D1
+// execute the SQL file directly.
+const statements = [];
 const results = [];
 
 for (const row of rows) {
@@ -127,7 +130,6 @@ for (const row of rows) {
   }
 }
 
-statements.push('COMMIT;');
 fs.writeFileSync(sqlPath, statements.join('\n') + '\n');
 
 const counts = results.reduce((acc, item) => {
