@@ -1,0 +1,126 @@
+name: Audit Phase B tool benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'scripts/benchmark-phase-b-tools.mjs'
+      - '.github/workflows/audit-phase-b-tool-benchmark.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-b-tool-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Benchmark Phase B extraction helpers
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install repository dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Install benchmark-only wink packages
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund wink-nlp@2.4.0 wink-eng-lite-web-model@1.8.1
+
+      - name: Fetch real Phase B corpus from D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p phase-b-tool-benchmark/raw
+
+          for club in ol psg om; do
+            SQL="SELECT a.club_id, r.id, r.source_id, COALESCE(e.normalized_title,r.title) AS title, COALESCE(e.normalized_excerpt,r.excerpt,'') AS excerpt, COALESCE(e.normalized_content,r.raw_content,'') AS content, COALESCE(e.normalized_published_at,r.published_at,r.last_seen_at) AS published_at FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id JOIN article_extractions e ON e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed' WHERE a.club_id='${club}' AND a.decision='relevant' AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' ORDER BY COALESCE(e.normalized_published_at,r.published_at,r.last_seen_at) DESC LIMIT 60"
+            npx wrangler d1 execute DB --remote --json --command "$SQL" > "phase-b-tool-benchmark/raw/${club}.json"
+          done
+
+          npx wrangler d1 execute DB --remote --json --command "SELECT club_id, alias FROM club_aliases ORDER BY club_id, alias" > phase-b-tool-benchmark/raw/aliases.json
+
+      - name: Normalize D1 JSON corpus
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          def rows(path):
+              raw=json.loads(Path(path).read_text(encoding='utf-8'))
+              if isinstance(raw,list):
+                  out=[]
+                  for item in raw:
+                      if isinstance(item,dict):
+                          out.extend(item.get('results') or [])
+                  return out
+              if isinstance(raw,dict):
+                  return raw.get('results') or []
+              return []
+
+          articles=[]
+          for club in ('ol','psg','om'):
+              articles.extend(rows(f'phase-b-tool-benchmark/raw/{club}.json'))
+          aliases=rows('phase-b-tool-benchmark/raw/aliases.json')
+          Path('phase-b-tool-benchmark/corpus.json').write_text(
+              json.dumps({'articles':articles,'aliases':aliases},ensure_ascii=False),
+              encoding='utf-8'
+          )
+          print(f'articles={len(articles)} aliases={len(aliases)}')
+          PY
+
+      - name: Run deterministic / wink / TF-IDF benchmark
+        run: node scripts/benchmark-phase-b-tools.mjs phase-b-tool-benchmark/corpus.json phase-b-tool-benchmark/results | tee phase-b-tool-benchmark/console-summary.json
+
+      - name: Write readable summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d=json.loads(Path('phase-b-tool-benchmark/results/summary.json').read_text())
+          print('# Club Actu — Phase B tool benchmark')
+          print()
+          print(f"Corpus: **{d['corpus_articles']} rows / {d['unique_article_ids']} unique articles**")
+          print()
+          print('## Content availability')
+          print('| Club | Articles | Non-empty content | Coverage | p50 chars | p90 chars |')
+          print('|---|---:|---:|---:|---:|---:|')
+          for club,s in d['content_by_club'].items():
+              print(f"| {club.upper()} | {s['articles']} | {s['nonempty_content']} | {s['content_coverage']:.1%} | {s['content_length_p50']} | {s['content_length_p90']} |")
+          print()
+          print('## Current extraction on the same D1 corpus')
+          print('| Club | Events | Zero | Multi | Multi rate | Body events | Body rate |')
+          print('|---|---:|---:|---:|---:|---:|---:|')
+          for club,s in d['extraction_by_club'].items():
+              print(f"| {club.upper()} | {s['events']} | {s['zero']} | {s['multi']} | {s['multi_rate']:.1%} | {s['body_events']} | {s['body_event_rate']:.1%} |")
+          print()
+          print('## Candidate tools')
+          print(f"- regex vs wink sentence-boundary differences: **{d['sentence_boundary_differences']}**")
+          print(f"- literal aliases vs wink custom-club-entity differences: **{d['custom_club_entity_differences']}**")
+          print(f"- TF-IDF pairs above 0.18: **{d['tfidf_pairs_over_018']}**")
+          print(f"- TF-IDF top-30 anchor-consistency proxy: **{d['tfidf_top30_anchor_consistency']:.1%}**")
+          print()
+          print('> wink POS/NER is intentionally not scored: the available official model is English, while Club Actu currently processes French football text.')
+          PY
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-b-tool-benchmark-${{ github.run_id }}
+          path: |
+            phase-b-tool-benchmark/results/*.json
+            phase-b-tool-benchmark/console-summary.json
+          if-no-files-found: error
+          retention-days: 30
