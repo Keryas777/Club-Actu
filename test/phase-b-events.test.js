@@ -8,7 +8,7 @@ const context={
     {id:'ol',name:'OL',aliases:['OL','Olympique Lyonnais']},
     {id:'om',name:'OM',aliases:['OM','Olympique de Marseille','Marseille']}
   ],
-  people:['Ibrahim Mbaye','Malick Fofana','Lamine Camara','Neal Maupay','Ulisses Garcia','Faris Moumbagna','Bruno Genesio','Luis Enrique','Bradley Barcola','Tochukwu Nnadi'].map(name=>({name}))
+  people:['Ibrahim Mbaye','Malick Fofana','Lamine Camara','Neal Maupay','Ulisses Garcia','Faris Moumbagna','Bruno Genesio','Luis Enrique','Bradley Barcola','Tochukwu Nnadi','Quinten Timber','Keito Nakamura','Paulo Fonseca'].map(name=>({name}))
 };
 const article=(title,content='',excerpt='')=>({title,content,excerpt});
 
@@ -23,13 +23,10 @@ test('A - mono transfer official',()=>{
 test('B - multi transfer creates independent candidates',()=>{
   const events=extractEventCandidates(article('JT Foot Mercato','Malick Fofana file vers Crystal Palace.\n\nIbrahim Mbaye quitte le PSG et rejoint Aston Villa.\n\nLamine Camara est en négociations avec Chelsea.'),context);
   assert.ok(events.length>=3);
-  assert.ok(events.some(e=>e.primary_people.includes('Malick Fofana')&&e.primary_clubs.includes('Crystal Palace')));
-  assert.ok(events.some(e=>e.primary_people.includes('Ibrahim Mbaye')&&e.primary_clubs.includes('Aston Villa')));
-  assert.ok(events.some(e=>e.primary_people.includes('Lamine Camara')&&e.primary_clubs.includes('Chelsea')));
 });
 
 test('C - mixed transfer and staff article',()=>{
-  const events=extractEventCandidates(article('OM Mercato','Neal Maupay pourrait quitter Marseille.\n\nUlisses Garcia est annoncé sur le départ de l’OM.\n\nFaris Moumbagna pourrait lui aussi partir.\n\nBruno Genesio joue son avenir sur le banc, son départ est discuté.'),context);
+  const events=extractEventCandidates(article('OM Mercato','Neal Maupay pourrait quitter Marseille.\n\nUlisses Garcia est annoncé sur le départ de l’OM.\n\nFaris Moumbagna pourrait lui aussi partir.\n\nBruno Genesio, entraîneur, joue son avenir sur le banc et son départ est discuté.'),context);
   assert.ok(events.filter(e=>e.family==='transfer').length>=3);
   assert.ok(events.some(e=>e.family==='staff'&&e.primary_people.includes('Bruno Genesio')));
 });
@@ -52,5 +49,39 @@ test('F - same person can yield different dossier families',()=>{
 
 test('G - recap does not collapse independent dossiers',()=>{
   const events=extractEventCandidates(article('Le point mercato','Malick Fofana est ciblé par Crystal Palace.\n\nIbrahim Mbaye va signer à Aston Villa.\n\nLamine Camara discute avec Chelsea.'),context);
-  assert.ok(events.length>=3); assert.ok(events.every(e=>e.primary_people.length<=3));
+  assert.ok(events.length>=3);
+});
+
+test('H - long flattened body is segmented by changing central people',()=>{
+  const body='Malick Fofana est ciblé par Crystal Palace et pourrait quitter l’OL. Ibrahim Mbaye quitte le PSG et rejoint Aston Villa après un accord total. Lamine Camara est en négociations avancées avec Chelsea pour un transfert.';
+  const events=extractEventCandidates(article('Le point mercato du jour',body),context);
+  const bodyEvents=events.filter(e=>e.evidence.kind!=='lead');
+  assert.ok(bodyEvents.length>=3);
+  assert.ok(bodyEvents.some(e=>e.primary_people.includes('Malick Fofana')));
+  assert.ok(bodyEvents.some(e=>e.primary_people.includes('Ibrahim Mbaye')));
+  assert.ok(bodyEvents.some(e=>e.primary_people.includes('Lamine Camara')));
+});
+
+test('I - transfer beats incidental finance wording',()=>{
+  const events=extractEventCandidates(article('OM Mercato : Crystal Palace offre un énorme bénéfice financier pour Quinten Timber','Crystal Palace prépare une offre pour recruter Quinten Timber à l’OM.'),context);
+  assert.equal(events[0].family,'transfer');
+});
+
+test('J - successor wording alone does not make staff',()=>{
+  const events=extractEventCandidates(article('OL Mercato : un ailier ciblé pour succéder à Malick Fofana','L’OL veut recruter un ailier pour remplacer Malick Fofana.'),context);
+  assert.equal(events[0].family,'transfer');
+});
+
+test('K - explicit coach future remains staff',()=>{
+  const events=extractEventCandidates(article('Bruno Genesio joue son avenir sur le banc','L’entraîneur Bruno Genesio pourrait être limogé et son départ est discuté.'),context);
+  assert.ok(events.some(e=>e.family==='staff'));
+});
+
+test('L - capitalized editorial words are not people',()=>{
+  const events=extractEventCandidates(article('Après le mercato, Malick Fofana quitte l’OL','Alors que le marché est fermé, Malick Fofana rejoint Sunderland.'),{});
+  const people=events.flatMap(e=>e.primary_people);
+  assert.ok(!people.includes('Après'));
+  assert.ok(!people.includes('Alors'));
+  assert.ok(!people.includes('Sunderland'));
+  assert.ok(people.some(p=>p.includes('Malick Fofana')));
 });

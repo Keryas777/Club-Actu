@@ -42,8 +42,8 @@ jobs:
 
           print('# Club Actu — Phase B event extraction audit')
           print()
-          print('| Club | Articles | Events | 0 event | 1 event | Multi | Multi rate | Unknown | No person | No club |')
-          print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+          print('| Club | Articles | Events | 0 event | 1 event | Multi | Multi rate | Unknown | No person | No club | Body events | Body rate |')
+          print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
           for club in ('ol','psg','om'):
               data=json.loads(Path(f'phase-b-event-audit/{club}.json').read_text(encoding='utf-8'))
               print(
@@ -51,14 +51,15 @@ jobs:
                   f"{data.get('articles_with_0_events',0)} | {data.get('articles_with_1_event',0)} | "
                   f"{data.get('articles_with_multiple_events',0)} | {data.get('multi_event_rate',0):.1%} | "
                   f"{data.get('unknown_family_rate',0):.1%} | {data.get('events_without_primary_people',0)} | "
-                  f"{data.get('events_without_primary_clubs',0)} |"
+                  f"{data.get('events_without_primary_clubs',0)} | {data.get('body_event_count',0)} | "
+                  f"{data.get('body_event_rate',0):.1%} |"
               )
               print()
               print(f"### {club.upper()} family distribution")
               print('```json')
               print(json.dumps(data.get('family_distribution',{}),ensure_ascii=False,indent=2))
               print('```')
-              print()
+              print(f"Evidence kinds: `{json.dumps(data.get('evidence_kind_distribution',{}),ensure_ascii=False)}`")
               print(f"Events/article: `{json.dumps(data.get('events_per_article_distribution',{}), ensure_ascii=False)}`")
               print()
           PY
