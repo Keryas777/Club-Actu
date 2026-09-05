@@ -3,6 +3,7 @@ import {
   getPhaseAClosureStatusFixed,
   repairPhaseAResiduals
 } from "./phase-a-residuals.js";
+import { getPhaseBEventPreview } from "./phase-b-events.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -19,6 +20,12 @@ function bearerToken(request) {
   const auth = request.headers.get("Authorization") || "";
   const match = auth.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : null;
+}
+
+function parseLimit(url, fallback = 60, max = 120) {
+  const n = Number(url.searchParams.get("limit") || fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(max, Math.trunc(n)));
 }
 
 async function repairEndpoint(request, env, url) {
@@ -62,14 +69,25 @@ export default {
       return repairEndpoint(request, env, url);
     }
 
+    if (url.pathname === "/api/phase-b-event-preview" && request.method === "GET") {
+      if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+      const club = (url.searchParams.get("club") || "ol").trim().toLowerCase();
+      if (!["ol", "psg", "om"].includes(club)) {
+        return json({ ok: false, error: "Unsupported club", allowed: ["ol", "psg", "om"] }, { status: 400 });
+      }
+      const limit = parseLimit(url, 60, 120);
+      const articleId = (url.searchParams.get("article_id") || "").trim() || null;
+      const result = await getPhaseBEventPreview(env.DB, club, limit, articleId);
+      return json({ ok: true, ...result });
+    }
+
     return baseWorker.fetch(request, env, ctx);
   },
 
   async scheduled(event, env, ctx) {
     // Preserve the existing collection + deterministic Phase A + original role
-    // classifier schedule. Residual repair runs independently and idempotently;
-    // if both touch the same collection cycle, any newly-created review simply
-    // gets picked up on the next cycle.
+    // classifier schedule. Phase B event extraction stays preview-only and is
+    // deliberately NOT connected to scheduled production processing.
     baseWorker.scheduled(event, env, ctx);
     ctx.waitUntil(
       repairPhaseAResiduals(env.DB, env, {
