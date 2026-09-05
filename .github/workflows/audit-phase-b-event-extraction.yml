@@ -1,0 +1,85 @@
+name: Audit Phase B event extraction
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Relevant articles per club
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-b-event-extraction-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Backtest OL PSG OM event extraction
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch event previews
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          mkdir -p phase-b-event-audit
+          for club in ol psg om; do
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/phase-b-event-preview?club=$club&limit=$LIMIT" \
+              -o "phase-b-event-audit/$club.json"
+          done
+
+      - name: Print readable summary
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          print('# Club Actu — Phase B event extraction audit')
+          print()
+          print('| Club | Articles | Events | 0 event | 1 event | Multi | Multi rate | Unknown | No person | No club |')
+          print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+          for club in ('ol','psg','om'):
+              data=json.loads(Path(f'phase-b-event-audit/{club}.json').read_text(encoding='utf-8'))
+              print(
+                  f"| {club.upper()} | {data.get('article_count',0)} | {data.get('event_count',0)} | "
+                  f"{data.get('articles_with_0_events',0)} | {data.get('articles_with_1_event',0)} | "
+                  f"{data.get('articles_with_multiple_events',0)} | {data.get('multi_event_rate',0):.1%} | "
+                  f"{data.get('unknown_family_rate',0):.1%} | {data.get('events_without_primary_people',0)} | "
+                  f"{data.get('events_without_primary_clubs',0)} |"
+              )
+              print()
+              print(f"### {club.upper()} family distribution")
+              print('```json')
+              print(json.dumps(data.get('family_distribution',{}),ensure_ascii=False,indent=2))
+              print('```')
+              print()
+              print(f"Events/article: `{json.dumps(data.get('events_per_article_distribution',{}), ensure_ascii=False)}`")
+              print()
+          PY
+
+      - name: Print multi-event examples
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for club in ('ol','psg','om'):
+              data=json.loads(Path(f'phase-b-event-audit/{club}.json').read_text(encoding='utf-8'))
+              print(f'\n===== {club.upper()} MULTI-EVENT EXAMPLES =====')
+              rows=[row for row in data.get('articles',[]) if len(row.get('events',[]))>1]
+              for row in rows[:12]:
+                  print(json.dumps(row,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload complete JSON backtest
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-b-event-extraction-${{ github.run_id }}
+          path: phase-b-event-audit/*.json
+          if-no-files-found: error
+          retention-days: 30
