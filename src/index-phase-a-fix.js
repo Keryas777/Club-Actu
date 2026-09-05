@@ -3,7 +3,7 @@ import {
   getPhaseAClosureStatusFixed,
   repairPhaseAResiduals
 } from "./phase-a-residuals.js";
-import { getPhaseBEventPreview } from "./phase-b-events.js";
+import { getPhaseBEventPreview } from "./phase-b-events-full-content.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
