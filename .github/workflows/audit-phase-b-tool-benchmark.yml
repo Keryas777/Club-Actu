@@ -2,20 +2,13 @@ name: Audit Phase B tool benchmark
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'scripts/benchmark-phase-b-tools.mjs'
-      - 'scripts/benchmark-content-extractors.mjs'
-      - '.github/workflows/audit-phase-b-tool-benchmark.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: phase-b-tool-benchmark-${{ github.ref }}
-  cancel-in-progress: true
+  group: phase-b-tool-benchmark-manual
+  cancel-in-progress: false
 
 jobs:
   benchmark:
