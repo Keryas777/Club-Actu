@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - 'scripts/benchmark-phase-b-tools.mjs'
+      - 'scripts/benchmark-content-extractors.mjs'
       - '.github/workflows/audit-phase-b-tool-benchmark.yml'
 
 permissions:
@@ -34,8 +35,8 @@ jobs:
       - name: Install repository dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Install benchmark-only wink packages
-        run: npm install --no-save --ignore-scripts --no-audit --no-fund wink-nlp@2.4.0 wink-eng-lite-web-model@1.8.1
+      - name: Install benchmark-only packages
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund wink-nlp@2.4.0 wink-eng-lite-web-model@1.8.1 @mozilla/readability@0.6.0 jsdom@24.1.3 @postlight/parser@2.2.3
 
       - name: Fetch real Phase B corpus from D1
         env:
@@ -43,7 +44,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          mkdir -p phase-b-tool-benchmark/raw
+          mkdir -p phase-b-tool-benchmark/raw phase-b-content-benchmark/raw
 
           for club in ol psg om; do
             SQL="SELECT a.club_id, r.id, r.source_id, COALESCE(e.normalized_title,r.title) AS title, COALESCE(e.normalized_excerpt,r.excerpt,'') AS excerpt, COALESCE(e.normalized_content,r.raw_content,'') AS content, COALESCE(e.normalized_published_at,r.published_at,r.last_seen_at) AS published_at FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id JOIN article_extractions e ON e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed' WHERE a.club_id='${club}' AND a.decision='relevant' AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' ORDER BY COALESCE(e.normalized_published_at,r.published_at,r.last_seen_at) DESC LIMIT 60"
@@ -52,7 +53,10 @@ jobs:
 
           npx wrangler d1 execute DB --remote --json --command "SELECT club_id, alias FROM club_aliases ORDER BY club_id, alias" > phase-b-tool-benchmark/raw/aliases.json
 
-      - name: Normalize D1 JSON corpus
+          SQL_CONTENT="WITH ranked AS (SELECT r.source_id, r.id, r.canonical_url AS url, r.title, COALESCE(r.published_at,r.last_seen_at) AS published_at, ROW_NUMBER() OVER (PARTITION BY r.source_id ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC) AS rn FROM raw_articles r JOIN sources s ON s.id=r.source_id WHERE s.enabled=1) SELECT source_id,id,url,title,published_at FROM ranked WHERE rn<=3 ORDER BY source_id,rn"
+          npx wrangler d1 execute DB --remote --json --command "$SQL_CONTENT" > phase-b-content-benchmark/raw/urls.json
+
+      - name: Normalize D1 JSON inputs
         run: |
           python3 - <<'PY'
           import json
@@ -78,11 +82,19 @@ jobs:
               json.dumps({'articles':articles,'aliases':aliases},ensure_ascii=False),
               encoding='utf-8'
           )
-          print(f'articles={len(articles)} aliases={len(aliases)}')
+          content_articles=rows('phase-b-content-benchmark/raw/urls.json')
+          Path('phase-b-content-benchmark/urls.json').write_text(
+              json.dumps({'articles':content_articles},ensure_ascii=False),
+              encoding='utf-8'
+          )
+          print(f'phase_b_articles={len(articles)} aliases={len(aliases)} content_samples={len(content_articles)}')
           PY
 
       - name: Run deterministic / wink / TF-IDF benchmark
         run: node scripts/benchmark-phase-b-tools.mjs phase-b-tool-benchmark/corpus.json phase-b-tool-benchmark/results | tee phase-b-tool-benchmark/console-summary.json
+
+      - name: Benchmark Readability / Postlight on active sources
+        run: node scripts/benchmark-content-extractors.mjs phase-b-content-benchmark/urls.json phase-b-content-benchmark/results | tee phase-b-content-benchmark/console-summary.txt
 
       - name: Write readable summary
         run: |
@@ -90,11 +102,12 @@ jobs:
           import json
           from pathlib import Path
           d=json.loads(Path('phase-b-tool-benchmark/results/summary.json').read_text())
+          c=json.loads(Path('phase-b-content-benchmark/results/summary.json').read_text())
           print('# Club Actu — Phase B tool benchmark')
           print()
           print(f"Corpus: **{d['corpus_articles']} rows / {d['unique_article_ids']} unique articles**")
           print()
-          print('## Content availability')
+          print('## Content currently present in Phase A')
           print('| Club | Articles | Non-empty content | Coverage | p50 chars | p90 chars |')
           print('|---|---:|---:|---:|---:|---:|')
           for club,s in d['content_by_club'].items():
@@ -106,11 +119,17 @@ jobs:
           for club,s in d['extraction_by_club'].items():
               print(f"| {club.upper()} | {s['events']} | {s['zero']} | {s['multi']} | {s['multi_rate']:.1%} | {s['body_events']} | {s['body_event_rate']:.1%} |")
           print()
-          print('## Candidate tools')
+          print('## wink / TF-IDF')
           print(f"- regex vs wink sentence-boundary differences: **{d['sentence_boundary_differences']}**")
           print(f"- literal aliases vs wink custom-club-entity differences: **{d['custom_club_entity_differences']}**")
           print(f"- TF-IDF pairs above 0.18: **{d['tfidf_pairs_over_018']}**")
           print(f"- TF-IDF top-30 anchor-consistency proxy: **{d['tfidf_top30_anchor_consistency']:.1%}**")
+          print()
+          print('## Generic full-content extraction benchmark')
+          print('| Source | Samples | Fetch | Readability | Readability p50 chars | Postlight | Postlight p50 chars |')
+          print('|---|---:|---:|---:|---:|---:|---:|')
+          for source,s in sorted(c['by_source'].items()):
+              print(f"| {source} | {s['samples']} | {s['fetch_rate']:.0%} | {s['readability_success_rate']:.0%} | {s['readability_median_chars']:.0f} | {s['postlight_success_rate']:.0%} | {s['postlight_median_chars']:.0f} |")
           print()
           print('> wink POS/NER is intentionally not scored: the available official model is English, while Club Actu currently processes French football text.')
           PY
@@ -122,5 +141,7 @@ jobs:
           path: |
             phase-b-tool-benchmark/results/*.json
             phase-b-tool-benchmark/console-summary.json
+            phase-b-content-benchmark/results/*.json
+            phase-b-content-benchmark/console-summary.txt
           if-no-files-found: error
           retention-days: 30
