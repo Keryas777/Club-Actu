@@ -21,18 +21,84 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch event previews
+      - name: Probe worker and D1 health
         env:
           BASE_URL: https://club-actu.deliriousfan7.workers.dev
-          LIMIT: ${{ inputs.limit }}
         run: |
           set -euo pipefail
           mkdir -p phase-b-event-audit
+          set +e
+          probe_result=$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            --output phase-b-event-audit/phase-a-health.json \
+            --write-out '%{http_code} %{time_total}' \
+            "$BASE_URL/api/phase-a-closure-status")
+          probe_rc=$?
+          set -e
+          read -r probe_status probe_time <<< "$probe_result"
+          echo "Phase A/D1 health: curl_rc=${probe_rc} http=${probe_status:-000} time=${probe_time:-n/a}s"
+          if [ "$probe_rc" -ne 0 ] || ! [[ "${probe_status:-000}" =~ ^2 ]]; then
+            echo 'Phase A/D1 health probe failed before Phase B preview.'
+            head -c 1500 phase-b-event-audit/phase-a-health.json 2>/dev/null || true
+            echo
+            exit 1
+          fi
+
+      - name: Fetch event previews
+        env:
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          LIMIT: ${{ inputs.limit || '60' }}
+        run: |
+          set -euo pipefail
+          mkdir -p phase-b-event-audit
+          failed=0
+
           for club in ol psg om; do
-            curl --fail-with-body --silent --show-error \
-              "$BASE_URL/api/phase-b-event-preview?club=$club&limit=$LIMIT" \
-              -o "phase-b-event-audit/$club.json"
+            output="phase-b-event-audit/$club.json"
+            set +e
+            request_result=$(curl --silent --show-error \
+              --connect-timeout 10 --max-time 90 \
+              --output "$output" \
+              --write-out '%{http_code} %{time_total}' \
+              "$BASE_URL/api/phase-b-event-preview?club=$club&limit=$LIMIT")
+            request_rc=$?
+            set -e
+            read -r http_status request_time <<< "$request_result"
+
+            echo "$club requested_limit=$LIMIT curl_rc=$request_rc http=${http_status:-000} time=${request_time:-n/a}s"
+
+            if [ "$request_rc" -ne 0 ] || ! [[ "${http_status:-000}" =~ ^2 ]]; then
+              failed=1
+              echo "--- $club response body (max 1500 bytes) ---"
+              head -c 1500 "$output" 2>/dev/null || true
+              echo
+
+              # A tiny read distinguishes a general SQL/schema/runtime failure
+              # from a failure that appears only when full bodies are processed
+              # in a larger batch.
+              tiny_output="phase-b-event-audit/$club-limit-1.json"
+              set +e
+              tiny_result=$(curl --silent --show-error \
+                --connect-timeout 10 --max-time 30 \
+                --output "$tiny_output" \
+                --write-out '%{http_code} %{time_total}' \
+                "$BASE_URL/api/phase-b-event-preview?club=$club&limit=1")
+              tiny_rc=$?
+              set -e
+              read -r tiny_status tiny_time <<< "$tiny_result"
+              echo "$club diagnostic_limit=1 curl_rc=$tiny_rc http=${tiny_status:-000} time=${tiny_time:-n/a}s"
+              if [ "$tiny_rc" -ne 0 ] || ! [[ "${tiny_status:-000}" =~ ^2 ]]; then
+                echo "--- $club limit=1 response body (max 1500 bytes) ---"
+                head -c 1500 "$tiny_output" 2>/dev/null || true
+                echo
+              fi
+            fi
           done
+
+          if [ "$failed" -ne 0 ]; then
+            echo 'At least one Phase B preview failed. See requested-limit and limit=1 diagnostics above.'
+            exit 1
+          fi
 
       - name: Print readable summary
         run: |
@@ -78,9 +144,10 @@ jobs:
           PY
 
       - name: Upload complete JSON backtest
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: phase-b-event-extraction-${{ github.run_id }}
           path: phase-b-event-audit/*.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
