@@ -1,0 +1,128 @@
+name: Enrich article content
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum articles to enrich
+        required: false
+        default: '20'
+  schedule:
+    # Cloudflare collection / Phase A runs at :00 and :30. Leave a 15 min gap.
+    - cron: '15,45 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: article-content-enrichment
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    name: Fetch full content for relevant articles
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install repository dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Install content extractor dependencies
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund @mozilla/readability@0.6.0 jsdom@24.1.3
+
+      - name: Check enrichment schema
+        id: schema
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p content-enrichment
+          npx wrangler d1 execute DB --remote --json \
+            --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='article_content_enrichments'" \
+            > content-enrichment/schema.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          raw=json.load(open('content-enrichment/schema.json'))
+          rows=[]
+          for item in raw if isinstance(raw,list) else [raw]:
+              rows.extend((item or {}).get('results') or [])
+          print('ready=' + ('true' if rows and int(rows[0].get('n',0)) else 'false'))
+          PY
+
+      - name: Explain missing schema
+        if: steps.schema.outputs.ready != 'true'
+        run: echo 'Migration 0009_content_enrichment.sql is not applied yet; nothing to do.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch enrichment candidates
+        if: steps.schema.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REQUESTED_LIMIT: ${{ github.event.inputs.limit || '20' }}
+        run: |
+          set -euo pipefail
+          LIMIT="$REQUESTED_LIMIT"
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then LIMIT=20; fi
+          if [ "$LIMIT" -lt 1 ]; then LIMIT=1; fi
+          if [ "$LIMIT" -gt 50 ]; then LIMIT=50; fi
+
+          SQL="SELECT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM raw_articles r LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' AND a.decision='relevant') AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT ${LIMIT}"
+          npx wrangler d1 execute DB --remote --json --command "$SQL" > content-enrichment/candidates-raw.json
+
+          python3 - <<'PY'
+          import json
+          raw=json.load(open('content-enrichment/candidates-raw.json'))
+          rows=[]
+          for item in raw if isinstance(raw,list) else [raw]:
+              rows.extend((item or {}).get('results') or [])
+          json.dump(rows,open('content-enrichment/candidates.json','w'),ensure_ascii=False)
+          print(f'candidates={len(rows)}')
+          PY
+
+      - name: Extract article bodies
+        if: steps.schema.outputs.ready == 'true'
+        run: node scripts/enrich-article-content.mjs content-enrichment/candidates.json content-enrichment/apply.sql content-enrichment/summary.json
+
+      - name: Apply enrichment results
+        if: steps.schema.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 execute DB --remote --file content-enrichment/apply.sql
+
+      - name: Write summary
+        if: steps.schema.outputs.ready == 'true'
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d=json.load(open('content-enrichment/summary.json'))
+          print('# Club Actu — full-content enrichment')
+          print()
+          print(f"Candidates: **{d['candidates']}**")
+          print()
+          print('| Source | Completed | Retry | Failed | Median chars |')
+          print('|---|---:|---:|---:|---:|')
+          for source,s in sorted(d['by_source'].items()):
+              print(f"| {source} | {s.get('completed',0)} | {s.get('retry',0)} | {s.get('failed',0)} | {s.get('median_chars',0)} |")
+          print()
+          print('Article bodies are stored in D1 only; the workflow artifact does not contain article text.')
+          PY
+
+      - name: Upload diagnostics
+        if: steps.schema.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: article-content-enrichment-${{ github.run_id }}
+          path: content-enrichment/summary.json
+          if-no-files-found: error
+          retention-days: 14
