@@ -76,7 +76,7 @@ jobs:
           if [ "$LIMIT" -lt 1 ]; then LIMIT=1; fi
           if [ "$LIMIT" -gt 50 ]; then LIMIT=50; fi
 
-          SQL="SELECT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM raw_articles r LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' AND a.decision='relevant') AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT ${LIMIT}"
+          SQL="SELECT DISTINCT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='relevant' AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT ${LIMIT}"
           npx wrangler d1 execute DB --remote --json --command "$SQL" > content-enrichment/candidates-raw.json
 
           python3 - <<'PY'
