@@ -3,7 +3,6 @@ import {
   getPhaseAClosureStatusFixed,
   repairPhaseAResiduals
 } from "./phase-a-residuals.js";
-import { getPhaseBEventPreview } from "./phase-b-events-full-content.js";
 
 function json(data, init = {}) {
   return Response.json(data, {
@@ -55,6 +54,31 @@ async function repairEndpoint(request, env, url) {
   return json({ ok: true, trigger: "repair_phase_a_residuals", ...result });
 }
 
+async function phaseBEventPreviewEndpoint(env, club, limit, articleId) {
+  try {
+    // Keep Phase B preview code out of Worker startup. If the preview module or
+    // its full-content read path fails, Phase A and all other routes must stay healthy.
+    const { getPhaseBEventPreview } = await import("./phase-b-events-full-content.js");
+    const result = await getPhaseBEventPreview(env.DB, club, limit, articleId);
+    return json({ ok: true, ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("phase-b-event-preview failed", { name, message, club, limit, articleId });
+    return json({
+      ok: false,
+      error: "phase_b_event_preview_failed",
+      diagnostic: {
+        name,
+        message,
+        club,
+        limit,
+        article_id: articleId
+      }
+    }, { status: 500 });
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -77,8 +101,7 @@ export default {
       }
       const limit = parseLimit(url, 60, 120);
       const articleId = (url.searchParams.get("article_id") || "").trim() || null;
-      const result = await getPhaseBEventPreview(env.DB, club, limit, articleId);
-      return json({ ok: true, ...result });
+      return phaseBEventPreviewEndpoint(env, club, limit, articleId);
     }
 
     return baseWorker.fetch(request, env, ctx);
