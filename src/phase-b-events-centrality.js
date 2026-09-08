@@ -7,7 +7,7 @@ const PREVIEW_TITLE = /\b(?:pronostic|avant[- ]match|composition probable|compo 
 const ROUNDUP_TITLE = /\b(?:jt foot mercato|les infos du jour|le point mercato|point mercato|\d+ transferts?|\d+ joueurs libres)\b/i;
 const BODY_NOISE = /^(?:composition probable|historique\b|classement\b|les cotes\b|notre pronostic\b|pronostic\b|effectif\b|l['’ ]?infirmerie\b|infirmerie\b|les derni[eè]res confrontations\b|face[- ]a[- ]face\b|voir aussi\b|lire aussi\b)/i;
 const HISTORICAL_CONTEXT = /\b(?:saison derni[eè]re|saison pass[eé]e|l['’ ]an dernier|avait d[eé]j[aà]|avaient d[eé]j[aà]|lors de la premi[eè]re journ[eé]e|la saison pr[eé]c[eé]dente)\b/i;
-const STRONG_EVENT_ACTION = /\b(?:officialis|sign(?:e|é|ée|er|ent)?|rejoint|quitt(?:e|é|ée|er|ent)?|transf[eè]r|accord|offre|n[eé]goci|cibl|pr[eê]t|prolong|renouvel|bless|forfait|diagnostic|suspend|sanction|limog|licenci|nomm|d[eé]mis|rachat|cession|dncg|qualifi|[eé]limin|victoire|d[eé]faite|score)\b/i;
+const STRONG_EVENT_ACTION = /\b(?:officialis\w*|sign(?:e|é|ée|er|ent)?|rejoint|quitt(?:e|é|ée|er|ent)?|transf[eè]r\w*|accord|offre|n[eé]goci\w*|discut\w*|cibl\w*|pr[eê]t|prolong\w*|renouvel\w*|bless\w*|forfait|diagnostic|suspend\w*|sanction\w*|limog\w*|licenci\w*|nomm\w*|d[eé]mis|rachat|cession|dncg|qualifi\w*|[eé]limin\w*|victoire|d[eé]faite|score)\b/i;
 const REJECTED_PERSON = /^(?:c['’ ]?est|pronostic|premier|pourquoi|est[- ]ce|l['’ ]?effectif|l['’ ]?historique|l['’ ]?infirmerie|l['’ ]?arriv[eé]e|l['’ ]?ailier|les parisiens|les gones|les marseillais|les eagles|les black cats|les bianconeri)$/i;
 const TOKEN_STOP = new Set([
   'mercato','football','match','club','equipe','joueur','joueurs','officiel','officielle','ligue','championnat','saison','direct','info','news','transfert',
