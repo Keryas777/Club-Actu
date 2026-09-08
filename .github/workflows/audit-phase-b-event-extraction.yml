@@ -233,8 +233,12 @@ jobs:
                   'articles': articles,
               }
 
+              # Some source pages contain lone UTF-16 surrogate escapes. Python
+              # can parse those from JSON, but cannot write them as raw UTF-8.
+              # ASCII JSON escaping preserves the payload while keeping the
+              # aggregated artifact valid and portable.
               (root / f'{club}.json').write_text(
-                  json.dumps(aggregated, ensure_ascii=False, indent=2),
+                  json.dumps(aggregated, ensure_ascii=True, indent=2),
                   encoding='utf-8'
               )
               print(f'{club}: pages={len(parts)} articles={len(articles)} events={total}')
@@ -282,7 +286,7 @@ jobs:
               print(f'\n===== {club.upper()} MULTI-EVENT EXAMPLES =====')
               rows=[row for row in data.get('articles',[]) if len(row.get('events',[]))>1]
               for row in rows[:12]:
-                  print(json.dumps(row,ensure_ascii=False,indent=2))
+                  print(json.dumps(row,ensure_ascii=True,indent=2))
           PY
 
       - name: Upload complete JSON backtest
