@@ -10,6 +10,7 @@ const HISTORICAL_CONTEXT = /\b(?:saison derni[eè]re|saison pass[eé]e|l['’ ]a
 const STRONG_EVENT_ACTION = /\b(?:officialis\w*|sign(?:e|é|ée|er|ent)?|rejoint|quitt(?:e|é|ée|er|ent)?|transf[eè]r\w*|accord|offre|n[eé]goci\w*|discut\w*|cibl\w*|pr[eê]t|prolong\w*|renouvel\w*|bless\w*|forfait|diagnostic|suspend\w*|sanction\w*|limog\w*|licenci\w*|nomm\w*|d[eé]mis|rachat|cession|dncg|qualifi\w*|[eé]limin\w*|victoire|d[eé]faite|score)\b/i;
 const REJECTED_PERSON = /^(?:c['’ ]?est|pronostic|premier|pourquoi|est[- ]ce|d['’ ]?abord|l['’ ]?information|l['’ ]?autre|l['’ ]?avenir|l['’ ]?ancien|l['’ ]?attaquant|l['’ ]?arbitre|l['’ ]?effectif|l['’ ]?historique|l['’ ]?infirmerie|l['’ ]?arriv[eé]e|l['’ ]?ailier|l['’ ]?an|j['’ ]?ai|s['’ ]?il|celui-ci|celle-ci|bonne|les parisiens|les gones|les marseillais|les eagles|les black cats|les bianconeri)$/i;
 const ORGANISATION_LIKE_PERSON = /\b(?:city|united|football club|\bfc\b|\bcf\b|\bafc\b|stade|olympique|ajax|slovan|borussia|sporting|palace|black cats|caught offside|actu foot|massilia zone|tunisie num[eé]rique)\b/i;
+const TITLE_STRONG_TRANSFER = /\b(?:mercato|transfert|recrut\w*|offre|accord|sign\w*|rejoint|cibl\w*|n[eé]goci\w*|pr[eê]t)\b/i;
 const TITLE_TRANSFER = /\b(?:mercato|transfert|recrut\w*|offre|accord|sign\w*|rejoint|quitt\w*|d[eé]part|cibl\w*|n[eé]goci\w*|pr[eê]t)\b/i;
 const TITLE_CONTRACT = /\b(?:prolong\w*|renouvel\w*|contrat)\b/i;
 const TITLE_INJURY = /\b(?:bless\w*|forfait|infirmerie|diagnostic|l[eé]sion)\b/i;
@@ -128,9 +129,11 @@ function mainProtagonists(lead, title = '') {
 function dominantFamilyFromTitle(title = '', leadFamily = 'unknown') {
   if (TITLE_INJURY.test(title)) return 'injury';
   if (TITLE_DISCIPLINE.test(title)) return 'discipline';
+  if (TITLE_STRONG_TRANSFER.test(title)) return 'transfer';
+  if (leadFamily === 'staff' && TITLE_TRANSFER.test(title)) return 'staff';
+  if (TITLE_STAFF.test(title)) return 'staff';
   if (TITLE_TRANSFER.test(title)) return 'transfer';
   if (TITLE_CONTRACT.test(title)) return 'contract';
-  if (TITLE_STAFF.test(title)) return 'staff';
   if (TITLE_FINANCE.test(title)) return 'finance';
   if (TITLE_COMPETITION.test(title)) return 'competition';
   if (TITLE_MATCH.test(title)) return 'match';
