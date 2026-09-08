@@ -142,7 +142,7 @@ test('title-named protagonist wins over an incidental person extracted in the le
       'Bruno Genesio pourrait quitter son poste d’entraîneur et son avenir inquiète le club.',
       'Bruno Genesio est encore sous contrat avec l’OM.'
     ].join('\n\n'),
-    'Stéphane Martins estime que Bruno Genesio reste au centre du dossier.'
+    'Stéphane Martins estime que l’entraîneur Bruno Genesio reste au centre du dossier.'
   ), context);
 
   const genesio = events.filter((event) => event.primary_people.includes('Bruno Genesio'));
