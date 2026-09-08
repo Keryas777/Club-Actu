@@ -10,7 +10,8 @@ const context = {
   ],
   people: [
     'Ibrahim Mbaye', 'Malick Fofana', 'Lamine Camara', 'Neal Maupay',
-    'Bruno Genesio', 'Bradley Barcola', 'Tochukwu Nnadi', 'Paulo Fonseca'
+    'Bruno Genesio', 'Bradley Barcola', 'Tochukwu Nnadi', 'Paulo Fonseca',
+    'Karim Benzema', 'Pierre Sage'
   ].map((name) => ({ name }))
 };
 
@@ -76,14 +77,18 @@ test('editorial signal fragments are not emitted as body events', () => {
 
 test('editorial pseudo-people are removed from primary_people', () => {
   const events = extractEventCandidates(article(
-    'Pronostic PSG Monaco – Ligue 1',
-    'L’infirmerie. Bradley Barcola est forfait.\n\nPremier signal faible : le PSG pourrait changer sa composition.'
+    'Mercato OL : coup de théâtre annoncé pour Malick Fofana',
+    [
+      'D’abord, Malick Fofana reste ciblé par Crystal Palace.',
+      'L’information confirme que Malick Fofana est encore sous contrat à l’OL.',
+      'L’autre scénario concerne Malick Fofana et Sunderland.'
+    ].join('\n\n')
   ), context);
 
   const people = events.flatMap((event) => event.primary_people);
-  assert.ok(!people.includes('L’infirmerie'));
-  assert.ok(!people.includes('Premier'));
-  assert.ok(!people.includes('C’est'));
+  for (const pseudo of ['D’abord', 'L’information', 'L’autre', 'Premier', 'C’est']) {
+    assert.ok(!people.includes(pseudo));
+  }
 });
 
 test('same dossier is merged even when repeated in non-adjacent body paragraphs', () => {
@@ -95,4 +100,52 @@ test('same dossier is merged even when repeated in non-adjacent body paragraphs'
   const fofana = events.filter((event) => event.primary_people.includes('Malick Fofana'));
   assert.equal(fofana.length, 1);
   assert.ok(fofana[0].evidence.fragments.length >= 2);
+});
+
+test('same protagonist cross-family context is coalesced into the dominant transfer dossier', () => {
+  const events = extractEventCandidates(article(
+    'Mercato OL : coup de théâtre annoncé pour Malick Fofana',
+    [
+      'Crystal Palace prépare une offre pour recruter Malick Fofana à l’OL.',
+      'Malick Fofana est encore sous contrat avec l’OL jusqu’en 2028.',
+      'Malick Fofana veut disputer une compétition européenne la saison prochaine.',
+      'L’entraîneur Paulo Fonseca souhaite éviter le départ de Malick Fofana.'
+    ].join('\n\n')
+  ), context);
+
+  const fofana = events.filter((event) => event.primary_people.includes('Malick Fofana'));
+  assert.equal(fofana.length, 1);
+  assert.equal(fofana[0].family, 'transfer');
+  assert.ok(fofana[0].evidence.fragments.length >= 3);
+});
+
+test('a genuine injury rupture for the same protagonist remains a separate event', () => {
+  const events = extractEventCandidates(article(
+    'Mercato OL : Malick Fofana ciblé par Crystal Palace',
+    [
+      'Crystal Palace prépare une offre pour recruter Malick Fofana à l’OL.',
+      'Malick Fofana s’est blessé à l’entraînement et un diagnostic a confirmé une lésion.'
+    ].join('\n\n')
+  ), context);
+
+  const fofana = events.filter((event) => event.primary_people.includes('Malick Fofana'));
+  assert.equal(fofana.length, 2);
+  assert.ok(fofana.some((event) => event.family === 'transfer'));
+  assert.ok(fofana.some((event) => event.family === 'injury'));
+});
+
+test('title-named protagonist wins over an incidental person extracted in the lead', () => {
+  const events = extractEventCandidates(article(
+    'OM : un départ de Bruno Genesio est déjà redouté à Marseille',
+    [
+      'Stéphane Martins évoque la situation de Bruno Genesio à l’OM.',
+      'Bruno Genesio pourrait quitter son poste d’entraîneur et son avenir inquiète le club.',
+      'Bruno Genesio est encore sous contrat avec l’OM.'
+    ].join('\n\n'),
+    'Stéphane Martins estime que Bruno Genesio reste au centre du dossier.'
+  ), context);
+
+  const genesio = events.filter((event) => event.primary_people.includes('Bruno Genesio'));
+  assert.equal(genesio.length, 1);
+  assert.equal(genesio[0].family, 'staff');
 });
