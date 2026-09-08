@@ -44,61 +44,201 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch event previews
+      - name: Fetch event previews in bounded pages
         env:
           BASE_URL: https://club-actu.deliriousfan7.workers.dev
-          LIMIT: ${{ inputs.limit || '60' }}
+          REQUESTED_LIMIT: ${{ inputs.limit || '60' }}
         run: |
           set -euo pipefail
           mkdir -p phase-b-event-audit
+
+          LIMIT="$REQUESTED_LIMIT"
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then LIMIT=60; fi
+          if [ "$LIMIT" -lt 1 ]; then LIMIT=1; fi
+          if [ "$LIMIT" -gt 120 ]; then LIMIT=120; fi
+          CHUNK_SIZE=20
           failed=0
 
           for club in ol psg om; do
-            output="phase-b-event-audit/$club.json"
-            set +e
-            request_result=$(curl --silent --show-error \
-              --connect-timeout 10 --max-time 90 \
-              --output "$output" \
-              --write-out '%{http_code} %{time_total}' \
-              "$BASE_URL/api/phase-b-event-preview?club=$club&limit=$LIMIT")
-            request_rc=$?
-            set -e
-            read -r http_status request_time <<< "$request_result"
+            offset=0
+            part=0
 
-            echo "$club requested_limit=$LIMIT curl_rc=$request_rc http=${http_status:-000} time=${request_time:-n/a}s"
+            while [ "$offset" -lt "$LIMIT" ]; do
+              remaining=$((LIMIT - offset))
+              size=$CHUNK_SIZE
+              if [ "$remaining" -lt "$size" ]; then size=$remaining; fi
 
-            if [ "$request_rc" -ne 0 ] || ! [[ "${http_status:-000}" =~ ^2 ]]; then
-              failed=1
-              echo "--- $club response body (max 1500 bytes) ---"
-              head -c 1500 "$output" 2>/dev/null || true
-              echo
+              printf -v part_label '%03d' "$part"
+              output="phase-b-event-audit/${club}-part-${part_label}.json"
 
-              # A tiny read distinguishes a general SQL/schema/runtime failure
-              # from a failure that appears only when full bodies are processed
-              # in a larger batch.
-              tiny_output="phase-b-event-audit/$club-limit-1.json"
               set +e
-              tiny_result=$(curl --silent --show-error \
-                --connect-timeout 10 --max-time 30 \
-                --output "$tiny_output" \
+              request_result=$(curl --silent --show-error \
+                --connect-timeout 10 --max-time 90 \
+                --output "$output" \
                 --write-out '%{http_code} %{time_total}' \
-                "$BASE_URL/api/phase-b-event-preview?club=$club&limit=1")
-              tiny_rc=$?
+                "$BASE_URL/api/phase-b-event-preview?club=$club&limit=$size&offset=$offset")
+              request_rc=$?
               set -e
-              read -r tiny_status tiny_time <<< "$tiny_result"
-              echo "$club diagnostic_limit=1 curl_rc=$tiny_rc http=${tiny_status:-000} time=${tiny_time:-n/a}s"
-              if [ "$tiny_rc" -ne 0 ] || ! [[ "${tiny_status:-000}" =~ ^2 ]]; then
-                echo "--- $club limit=1 response body (max 1500 bytes) ---"
-                head -c 1500 "$tiny_output" 2>/dev/null || true
+              read -r http_status request_time <<< "$request_result"
+
+              echo "$club requested_limit=$size offset=$offset curl_rc=$request_rc http=${http_status:-000} time=${request_time:-n/a}s"
+
+              if [ "$request_rc" -ne 0 ] || ! [[ "${http_status:-000}" =~ ^2 ]]; then
+                failed=1
+                echo "--- $club page response body (max 1500 bytes) ---"
+                head -c 1500 "$output" 2>/dev/null || true
                 echo
+
+                tiny_output="phase-b-event-audit/${club}-diagnostic-offset-${offset}.json"
+                set +e
+                tiny_result=$(curl --silent --show-error \
+                  --connect-timeout 10 --max-time 30 \
+                  --output "$tiny_output" \
+                  --write-out '%{http_code} %{time_total}' \
+                  "$BASE_URL/api/phase-b-event-preview?club=$club&limit=1&offset=$offset")
+                tiny_rc=$?
+                set -e
+                read -r tiny_status tiny_time <<< "$tiny_result"
+                echo "$club diagnostic_limit=1 offset=$offset curl_rc=$tiny_rc http=${tiny_status:-000} time=${tiny_time:-n/a}s"
+                if [ "$tiny_rc" -ne 0 ] || ! [[ "${tiny_status:-000}" =~ ^2 ]]; then
+                  echo "--- $club diagnostic response body (max 1500 bytes) ---"
+                  head -c 1500 "$tiny_output" 2>/dev/null || true
+                  echo
+                fi
+                break
               fi
-            fi
+
+              fetched=$(python3 - "$output" <<'PY'
+          import json, sys
+          try:
+              data=json.load(open(sys.argv[1], encoding='utf-8'))
+              print(int(data.get('article_count') or 0))
+          except Exception:
+              print(0)
+          PY
+              )
+
+              if [ "$fetched" -lt "$size" ]; then
+                echo "$club reached end of available rows at offset=$offset fetched=$fetched"
+                break
+              fi
+
+              offset=$((offset + size))
+              part=$((part + 1))
+            done
           done
 
           if [ "$failed" -ne 0 ]; then
-            echo 'At least one Phase B preview failed. See requested-limit and limit=1 diagnostics above.'
+            echo 'At least one paginated Phase B preview failed. See page and limit=1 diagnostics above.'
             exit 1
           fi
+
+      - name: Aggregate paginated previews
+        run: |
+          python3 - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          root = Path('phase-b-event-audit')
+          requested_limit = int('${{ inputs.limit || '60' }}') if str('${{ inputs.limit || '60' }}').isdigit() else 60
+          requested_limit = min(120, max(1, requested_limit))
+
+          for club in ('ol', 'psg', 'om'):
+              part_paths = sorted(root.glob(f'{club}-part-*.json'))
+              if not part_paths:
+                  raise SystemExit(f'No successful preview pages found for {club}')
+
+              parts = [json.loads(path.read_text(encoding='utf-8')) for path in part_paths]
+              articles = []
+              seen = set()
+              for part in parts:
+                  for row in part.get('articles', []):
+                      article_id = (row.get('article') or {}).get('id')
+                      if article_id and article_id in seen:
+                          continue
+                      if article_id:
+                          seen.add(article_id)
+                      articles.append(row)
+                      if len(articles) >= requested_limit:
+                          break
+                  if len(articles) >= requested_limit:
+                      break
+
+              family = Counter()
+              evidence = Counter()
+              content_sources = Counter()
+              event_count_distribution = Counter()
+              total = unknown = missing_people = missing_clubs = 0
+              zero = one = multi = lead_events = body_events = 0
+
+              for row in articles:
+                  content_sources[(row.get('article') or {}).get('content_source') or 'none'] += 1
+                  events = row.get('events') or []
+                  n = len(events)
+                  event_count_distribution[n] += 1
+                  if n == 0:
+                      zero += 1
+                  elif n == 1:
+                      one += 1
+                  else:
+                      multi += 1
+                  total += n
+
+                  for event in events:
+                      family[event.get('family') or 'unknown'] += 1
+                      kind = ((event.get('evidence') or {}).get('kind') or 'unknown')
+                      evidence[kind] += 1
+                      if kind == 'lead':
+                          lead_events += 1
+                      else:
+                          body_events += 1
+                      if event.get('family') == 'unknown':
+                          unknown += 1
+                      if not (event.get('primary_people') or []):
+                          missing_people += 1
+                      if not (event.get('primary_clubs') or []):
+                          missing_clubs += 1
+
+              first = parts[0]
+              aggregated = {
+                  'ok': True,
+                  'version': first.get('version'),
+                  'content_read_path': first.get('content_read_path'),
+                  'club_id': club,
+                  'article_id': None,
+                  'offset': 0,
+                  'requested_article_limit': requested_limit,
+                  'pagination': {
+                      'chunk_size': 20,
+                      'pages': len(parts),
+                      'deduplicated_articles': len(articles),
+                  },
+                  'article_count': len(articles),
+                  'event_count': total,
+                  'articles_with_0_events': zero,
+                  'articles_with_1_event': one,
+                  'articles_with_multiple_events': multi,
+                  'multi_event_rate': (multi / len(articles)) if articles else 0,
+                  'unknown_family_rate': (unknown / total) if total else 0,
+                  'events_without_primary_people': missing_people,
+                  'events_without_primary_clubs': missing_clubs,
+                  'lead_event_count': lead_events,
+                  'body_event_count': body_events,
+                  'body_event_rate': (body_events / total) if total else 0,
+                  'content_source_distribution': dict(content_sources.most_common()),
+                  'family_distribution': dict(family.most_common()),
+                  'evidence_kind_distribution': dict(evidence.most_common()),
+                  'events_per_article_distribution': {str(k): v for k, v in sorted(event_count_distribution.items())},
+                  'articles': articles,
+              }
+
+              (root / f'{club}.json').write_text(
+                  json.dumps(aggregated, ensure_ascii=False, indent=2),
+                  encoding='utf-8'
+              )
+              print(f'{club}: pages={len(parts)} articles={len(articles)} events={total}')
+          PY
 
       - name: Print readable summary
         run: |
@@ -121,6 +261,8 @@ jobs:
                   f"{data.get('body_event_rate',0):.1%} |"
               )
               print()
+              print(f"Pagination: `{json.dumps(data.get('pagination',{}), ensure_ascii=False)}`")
+              print(f"Content sources: `{json.dumps(data.get('content_source_distribution',{}), ensure_ascii=False)}`")
               print(f"### {club.upper()} family distribution")
               print('```json')
               print(json.dumps(data.get('family_distribution',{}),ensure_ascii=False,indent=2))

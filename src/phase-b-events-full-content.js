@@ -13,7 +13,13 @@ import {
  * This module is deliberately read-only: no Phase A state, hashes or decisions
  * are mutated here.
  */
-export async function getPhaseBEventPreview(db, clubId = 'ol', articleLimit = 60, articleId = null) {
+export async function getPhaseBEventPreview(
+  db,
+  clubId = 'ol',
+  articleLimit = 60,
+  articleId = null,
+  articleOffset = 0
+) {
   const { results: aliases } = await db.prepare(
     'SELECT club_id, alias, strength FROM club_aliases'
   ).all();
@@ -31,9 +37,10 @@ export async function getPhaseBEventPreview(db, clubId = 'ol', articleLimit = 60
   }
 
   const articleFilter = articleId ? 'AND r.id = ?' : '';
+  const effectiveOffset = articleId ? 0 : Math.max(0, Number(articleOffset) || 0);
   const bindings = articleId
-    ? [clubId, articleId, 1]
-    : [clubId, articleLimit];
+    ? [clubId, articleId, 1, 0]
+    : [clubId, articleLimit, effectiveOffset];
 
   const sql = `
     SELECT
@@ -69,8 +76,8 @@ export async function getPhaseBEventPreview(db, clubId = 'ol', articleLimit = 60
       AND a.source_content_hash = r.content_hash
       AND a.rule_version = 'phase-a-relevance-v3'
       ${articleFilter}
-    ORDER BY COALESCE(e.normalized_published_at, r.published_at, r.last_seen_at) DESC
-    LIMIT ?
+    ORDER BY COALESCE(e.normalized_published_at, r.published_at, r.last_seen_at) DESC, r.id DESC
+    LIMIT ? OFFSET ?
   `;
 
   const { results: articles } = await db.prepare(sql).bind(...bindings).all();
@@ -128,6 +135,7 @@ export async function getPhaseBEventPreview(db, clubId = 'ol', articleLimit = 60
     content_read_path: 'phase-a-4-full-content-v1',
     club_id: clubId,
     article_id: articleId || null,
+    offset: effectiveOffset,
     article_count: rows.length,
     event_count: total,
     articles_with_0_events: zero,
