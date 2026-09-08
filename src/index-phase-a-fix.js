@@ -27,6 +27,14 @@ function parseLimit(url, fallback = 60, max = 120) {
   return Math.max(1, Math.min(max, Math.trunc(n)));
 }
 
+function parseOffset(url, fallback = 0, max = 5000) {
+  const raw = url.searchParams.get("offset");
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(max, Math.trunc(n)));
+}
+
 async function repairEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -54,17 +62,17 @@ async function repairEndpoint(request, env, url) {
   return json({ ok: true, trigger: "repair_phase_a_residuals", ...result });
 }
 
-async function phaseBEventPreviewEndpoint(env, club, limit, articleId) {
+async function phaseBEventPreviewEndpoint(env, club, limit, offset, articleId) {
   try {
     // Keep Phase B preview code out of Worker startup. If the preview module or
     // its full-content read path fails, Phase A and all other routes must stay healthy.
     const { getPhaseBEventPreview } = await import("./phase-b-events-full-content.js");
-    const result = await getPhaseBEventPreview(env.DB, club, limit, articleId);
+    const result = await getPhaseBEventPreview(env.DB, club, limit, articleId, offset);
     return json({ ok: true, ...result });
   } catch (error) {
     const name = error instanceof Error ? error.name : "Error";
     const message = error instanceof Error ? error.message : String(error);
-    console.error("phase-b-event-preview failed", { name, message, club, limit, articleId });
+    console.error("phase-b-event-preview failed", { name, message, club, limit, offset, articleId });
     return json({
       ok: false,
       error: "phase_b_event_preview_failed",
@@ -73,6 +81,7 @@ async function phaseBEventPreviewEndpoint(env, club, limit, articleId) {
         message,
         club,
         limit,
+        offset,
         article_id: articleId
       }
     }, { status: 500 });
@@ -100,8 +109,9 @@ export default {
         return json({ ok: false, error: "Unsupported club", allowed: ["ol", "psg", "om"] }, { status: 400 });
       }
       const limit = parseLimit(url, 60, 120);
+      const offset = parseOffset(url, 0, 5000);
       const articleId = (url.searchParams.get("article_id") || "").trim() || null;
-      return phaseBEventPreviewEndpoint(env, club, limit, articleId);
+      return phaseBEventPreviewEndpoint(env, club, limit, offset, articleId);
     }
 
     return baseWorker.fetch(request, env, ctx);
