@@ -38,7 +38,8 @@ test('generic coup dur title uses the retained injury evidence as the dominant d
     [
       'Touché musculairement lors de la défaite à Monaco, Geoffrey Kondogbia pourrait être éloigné des terrains plusieurs semaines.',
       'Cette blessure concerne Geoffrey Kondogbia et un diagnostic doit préciser la durée de son indisponibilité.'
-    ].join('\n\n')
+    ].join('\n\n'),
+    'Touché musculairement, Geoffrey Kondogbia pourrait être éloigné des terrains pendant plusieurs semaines.'
   ), context);
 
   assert.equal(events.length, 1);
@@ -81,7 +82,8 @@ test('same transfer continuation without an extracted person is attached to the 
     [
       'Emile Hojbjerg a repoussé les avances de l’AS Roma et veut rester à l’OM.',
       'L’OM a refusé une offre de l’AS Roma et ne souhaite pas le laisser partir à bas prix.'
-    ].join('\n\n')
+    ].join('\n\n'),
+    'Emile Hojbjerg a repoussé les avances de l’AS Roma et donne sa priorité à l’OM.'
   ), context);
 
   assert.equal(events.length, 1);
