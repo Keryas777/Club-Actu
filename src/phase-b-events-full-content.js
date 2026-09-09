@@ -1,7 +1,7 @@
 import {
   EVENT_EXTRACTOR_VERSION,
   extractEventCandidates
-} from './phase-b-events-centrality.js';
+} from './phase-b-events-targeted.js';
 
 /**
  * Phase B preview read-path after Phase A.4.
