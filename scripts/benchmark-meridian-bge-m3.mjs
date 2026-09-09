@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const MODEL='@cf/baai/bge-m3';
 const CLUBS=['ol','psg','om'];
 const VARIANTS=['structured','semantic','anchors'];
+const PREVIEW_PAGE_SIZE=10;
 const norm=(v='')=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
 const uniq=(xs=[])=>{const s=new Set(),o=[];for(const x of xs){const k=norm(x);if(k&&!s.has(k)){s.add(k);o.push(String(x).replace(/\s+/g,' ').trim());}}return o;};
 const set=(xs=[])=>new Set(xs.map(norm).filter(Boolean));
@@ -77,8 +78,65 @@ function simulate(records,emb,threshold=.60,anchorThreshold=.50,useAnchor=true){
 
 function vectors(payload,n){for(const x of [payload?.result?.data,payload?.data,payload?.result?.response,payload?.response])if(Array.isArray(x)&&x.length===n&&Array.isArray(x[0]))return x;throw new Error(`Unexpected BGE-M3 response: ${JSON.stringify(payload).slice(0,800)}`);}
 async function embed(texts,account,token){const out=[],url=`https://api.cloudflare.com/client/v4/accounts/${account}/ai/run/${MODEL}`;for(let i=0;i<texts.length;i+=32){const batch=texts.slice(i,i+32),res=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({text:batch})}),p=await res.json().catch(()=>({}));if(!res.ok||p?.success===false)throw new Error(`Workers AI HTTP ${res.status}: ${JSON.stringify(p).slice(0,1200)}`);out.push(...vectors(p,batch.length));}return out;}
-async function fetchJson(url){const r=await fetch(url,{signal:AbortSignal.timeout(90000)}),t=await r.text();let d;try{d=JSON.parse(t);}catch{throw new Error(`Non-JSON HTTP ${r.status}: ${t.slice(0,500)}`);}if(!r.ok||d?.ok===false)throw new Error(`Preview HTTP ${r.status}: ${JSON.stringify(d).slice(0,1000)}`);return d;}
-async function previews(base,limit){const out=[];for(const club of CLUBS){const articles=[];let first=null;for(let offset=0;offset<limit;offset+=20){const size=Math.min(20,limit-offset),p=await fetchJson(`${base.replace(/\/$/,'')}/api/phase-b-event-preview?club=${club}&limit=${size}&offset=${offset}`);first||=p;articles.push(...(p.articles||[]));if((p.article_count||0)<size)break;}const rows=articles.slice(0,limit);out.push({...first,club_id:club,article_count:rows.length,event_count:rows.reduce((s,r)=>s+(r.events||[]).length,0),articles:rows});}return out;}
+
+const wait=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
+class PreviewFetchError extends Error{
+  constructor(message,status=0,body='',resourceLimit=false){super(message);this.status=status;this.body=body;this.resourceLimit=resourceLimit;}
+}
+
+async function fetchJson(url){
+  let lastError=null;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const r=await fetch(url,{signal:AbortSignal.timeout(90000)}),t=await r.text();
+      const resourceLimit=r.status===503&&/worker exceeded resource limits|error code:\s*1102/i.test(t);
+      if(resourceLimit)throw new PreviewFetchError(`Worker resource limit HTTP ${r.status}`,r.status,t,true);
+      let d;
+      try{d=JSON.parse(t);}catch{throw new PreviewFetchError(`Non-JSON HTTP ${r.status}: ${t.slice(0,500)}`,r.status,t,false);}
+      if(r.ok&&d?.ok!==false)return d;
+      const err=new PreviewFetchError(`Preview HTTP ${r.status}: ${JSON.stringify(d).slice(0,1000)}`,r.status,JSON.stringify(d),false);
+      if(![429,500,502,503,504].includes(r.status))throw err;
+      lastError=err;
+    }catch(error){
+      if(error?.resourceLimit)throw error;
+      lastError=error;
+    }
+    if(attempt<2)await wait(500*(2**attempt));
+  }
+  throw lastError||new Error(`Preview request failed: ${url}`);
+}
+
+async function fetchPreviewPage(base,club,size,offset){
+  const url=`${base.replace(/\/$/,'')}/api/phase-b-event-preview?club=${club}&limit=${size}&offset=${offset}`;
+  try{return await fetchJson(url);}catch(error){
+    if(!error?.resourceLimit||size<=1)throw error;
+    const leftSize=Math.ceil(size/2),rightSize=size-leftSize;
+    console.warn(`Phase B preview hit Worker resource limit: club=${club} offset=${offset} limit=${size}; retrying as ${leftSize}+${rightSize}`);
+    const left=await fetchPreviewPage(base,club,leftSize,offset);
+    const leftRows=left.articles||[];
+    if(leftRows.length<leftSize||rightSize===0)return {...left,offset,article_count:leftRows.length,event_count:leftRows.reduce((sum,row)=>sum+(row.events||[]).length,0),articles:leftRows};
+    const right=await fetchPreviewPage(base,club,rightSize,offset+leftSize),rows=[...leftRows,...(right.articles||[])];
+    return {...left,offset,article_count:rows.length,event_count:rows.reduce((sum,row)=>sum+(row.events||[]).length,0),articles:rows};
+  }
+}
+
+async function previews(base,limit){
+  const out=[];
+  for(const club of CLUBS){
+    const articles=[];let first=null,offset=0;
+    while(offset<limit){
+      const size=Math.min(PREVIEW_PAGE_SIZE,limit-offset),p=await fetchPreviewPage(base,club,size,offset);
+      first||=p;
+      const rows=p.articles||[];
+      articles.push(...rows);
+      if(rows.length<size)break;
+      offset+=size;
+    }
+    const rows=articles.slice(0,limit);
+    out.push({...first,club_id:club,article_count:rows.length,event_count:rows.reduce((s,r)=>s+(r.events||[]).length,0),articles:rows});
+  }
+  return out;
+}
 
 async function main(){
   const arg=(n,d)=>{const i=process.argv.indexOf(n);return i>=0&&process.argv[i+1]?process.argv[i+1]:d;};
