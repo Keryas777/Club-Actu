@@ -1,0 +1,82 @@
+name: Audit Meridian BGE-M3 story matching
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Relevant articles per club
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meridian-bge-m3-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Benchmark football shortlist + BGE-M3 + anchor gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate Cloudflare credentials are configured
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Missing repository secret CLOUDFLARE_WORKERS_AI_API_TOKEN'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing repository secret CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          echo 'Cloudflare credential variables are present (values intentionally not printed).'
+
+      - name: Run Meridian/BGE-M3 benchmark
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLUB_ACTU_BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+          node scripts/benchmark-meridian-bge-m3.mjs \
+            --limit "${{ inputs.limit || '60' }}" \
+            --out-dir phase-b-meridian
+
+      - name: Print benchmark summary
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-meridian/summary.json', 'utf8'));
+          console.log('# Club Actu — Meridian / BGE-M3 benchmark');
+          console.log();
+          console.log(`Model: \`${s.model}\``);
+          console.log(`Extractor: \`${(s.extractor_versions || []).join(', ')}\``);
+          console.log(`Unique EVENT_CANDIDATE: **${s.unique_events}**`);
+          console.log();
+          console.log('| Representation | Dim | Mean chars | Possible pairs | Football shortlist | Reduction | Shortlist p95 embedding |');
+          console.log('|---|---:|---:|---:|---:|---:|---:|');
+          for (const [name, v] of Object.entries(s.variants || {})) {
+            const p95 = v.shortlist_embedding_quantiles?.p95;
+            console.log(`| ${name} | ${v.embedding_dimension} | ${v.representation_chars_mean.toFixed(0)} | ${v.possible_pairs} | ${v.shortlisted_pairs} | ${(100*v.reduction_rate).toFixed(1)}% | ${p95 == null ? 'n/a' : p95.toFixed(4)} |`);
+          }
+          console.log();
+          console.log('The artifact contains the source previews, compact representations, top scored candidate pairs and streaming simulations with/without Meridian-style anchor gate.');
+          console.log('This workflow is audit-only: no D1 writes, no story writes, no production clustering and no cron.');
+          NODE
+
+      - name: Upload complete benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ github.run_id }}
+          path: phase-b-meridian/
+          if-no-files-found: warn
+          retention-days: 30
