@@ -7,9 +7,14 @@ on:
         description: Relevant articles per club
         required: false
         default: '60'
+      phase_b_run_id:
+        description: Successful Phase B event-audit run to benchmark
+        required: false
+        default: '34347651580'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: meridian-bge-m3-audit-manual
@@ -29,6 +34,29 @@ jobs:
         with:
           node-version: 22
 
+      - name: Download reproducible Phase B source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: phase-b-event-extraction-${{ inputs.phase_b_run_id }}
+          path: phase-b-source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.phase_b_run_id }}
+
+      - name: Validate Phase B source artifact
+        run: |
+          set -euo pipefail
+          for club in ol psg om; do
+            test -s "phase-b-source/${club}.json" || { echo "Missing ${club}.json in Phase B artifact"; exit 1; }
+          done
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          for (const club of ['ol','psg','om']) {
+            const p = JSON.parse(fs.readFileSync(`phase-b-source/${club}.json`, 'utf8'));
+            console.log(`${club}: version=${p.version} articles=${(p.articles || []).length} events=${p.event_count || 0}`);
+          }
+          NODE
+
       - name: Validate Cloudflare credentials are configured
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
@@ -43,20 +71,87 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLUB_ACTU_BASE_URL: https://club-actu.deliriousfan7.workers.dev
         run: |
           set -euo pipefail
-          node scripts/benchmark-meridian-bge-m3.mjs \
-            --limit "${{ inputs.limit || '60' }}" \
-            --out-dir phase-b-meridian
+
+          # Serve the already-successful Phase B audit locally. This keeps the
+          # Meridian benchmark reproducible and isolates Workers AI from the
+          # production Worker's CPU/resource limits.
+          node --input-type=module <<'NODE' >/tmp/phase-b-artifact-server.log 2>&1 &
+          import fs from 'node:fs';
+          import http from 'node:http';
+
+          const clubs = Object.fromEntries(
+            ['ol','psg','om'].map(club => [
+              club,
+              JSON.parse(fs.readFileSync(`phase-b-source/${club}.json`, 'utf8'))
+            ])
+          );
+
+          const server = http.createServer((req, res) => {
+            const url = new URL(req.url, 'http://127.0.0.1:8788');
+            if (url.pathname === '/health') {
+              res.writeHead(200, {'content-type':'application/json'});
+              res.end(JSON.stringify({ok:true}));
+              return;
+            }
+            if (url.pathname !== '/api/phase-b-event-preview') {
+              res.writeHead(404, {'content-type':'application/json'});
+              res.end(JSON.stringify({ok:false,error:'not_found'}));
+              return;
+            }
+
+            const club = url.searchParams.get('club') || 'ol';
+            const source = clubs[club];
+            if (!source) {
+              res.writeHead(400, {'content-type':'application/json'});
+              res.end(JSON.stringify({ok:false,error:'unknown_club'}));
+              return;
+            }
+
+            const limit = Math.max(1, Math.min(120, Number(url.searchParams.get('limit')) || 60));
+            const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+            const articles = (source.articles || []).slice(offset, offset + limit);
+            const payload = {
+              ...source,
+              club_id: club,
+              article_id: null,
+              offset,
+              article_count: articles.length,
+              event_count: articles.reduce((sum,row) => sum + (row.events || []).length, 0),
+              articles
+            };
+            res.writeHead(200, {'content-type':'application/json; charset=utf-8'});
+            res.end(JSON.stringify(payload));
+          });
+
+          server.listen(8788, '127.0.0.1');
+          NODE
+
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          for _ in {1..20}; do
+            if curl --silent --fail http://127.0.0.1:8788/health >/dev/null; then break; fi
+            sleep 0.1
+          done
+          curl --silent --fail http://127.0.0.1:8788/health >/dev/null
+
+          CLUB_ACTU_BASE_URL=http://127.0.0.1:8788 \
+            node scripts/benchmark-meridian-bge-m3.mjs \
+              --limit "${{ inputs.limit || '60' }}" \
+              --out-dir phase-b-meridian
 
       - name: Print benchmark summary
+        env:
+          PHASE_B_RUN_ID: ${{ inputs.phase_b_run_id }}
         run: |
           node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
           import fs from 'node:fs';
           const s = JSON.parse(fs.readFileSync('phase-b-meridian/summary.json', 'utf8'));
           console.log('# Club Actu — Meridian / BGE-M3 benchmark');
           console.log();
+          console.log(`Phase B source run: \`${process.env.PHASE_B_RUN_ID}\``);
           console.log(`Model: \`${s.model}\``);
           console.log(`Extractor: \`${(s.extractor_versions || []).join(', ')}\``);
           console.log(`Unique EVENT_CANDIDATE: **${s.unique_events}**`);
