@@ -1,0 +1,91 @@
+name: Audit Meridian story calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_run_id:
+        description: Successful Meridian BGE-M3 benchmark run to calibrate
+        required: false
+        default: '34361891419'
+      sample_size:
+        description: Ground-truth review sample size
+        required: false
+        default: '120'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: meridian-story-calibration-manual
+  cancel-in-progress: false
+
+jobs:
+  calibration:
+    name: Build stratified Meridian calibration sample
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download reproducible Meridian benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id || '34361891419' }}
+          path: meridian-benchmark
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.benchmark_run_id || '34361891419' }}
+
+      - name: Validate benchmark source
+        run: |
+          set -euo pipefail
+          test -s meridian-benchmark/pairs-structured.json || { echo 'Missing pairs-structured.json'; exit 1; }
+          test -s meridian-benchmark/summary.json || { echo 'Missing summary.json'; exit 1; }
+
+      - name: Build calibration review sample
+        run: |
+          set -euo pipefail
+          node scripts/calibrate-meridian-story-thresholds.mjs \
+            --benchmark-dir meridian-benchmark \
+            --out-dir phase-b-meridian-calibration \
+            --sample-size "${{ inputs.sample_size || '120' }}"
+
+      - name: Print calibration summary
+        env:
+          BENCHMARK_RUN_ID: ${{ inputs.benchmark_run_id || '34361891419' }}
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-meridian-calibration/summary.json', 'utf8'));
+          console.log('# Club Actu — Meridian story calibration');
+          console.log();
+          console.log(`Meridian benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
+          console.log(`Model: \`${s.model}\` · representation: \`${s.representation}\``);
+          console.log(`Candidate pairs available in benchmark: **${s.available_pairs}**`);
+          console.log(`Ground-truth review sample: **${s.sample_size}**`);
+          console.log();
+          console.log('| Score bin | Available | Selected |');
+          console.log('|---|---:|---:|');
+          for (const [name, row] of Object.entries(s.sample_bins || {})) {
+            console.log(`| ${name} | ${row.available} | ${row.selected} |`);
+          }
+          console.log();
+          console.log('The review sample has blank same/different labels. Once labelled, the same script can score thresholds and a deterministic/ambiguous decision zone.');
+          console.log('Audit-only: no D1 writes, no story writes, no production clustering, no cron, no new Workers AI call.');
+          NODE
+
+      - name: Upload calibration artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-story-calibration-${{ github.run_id }}
+          path: phase-b-meridian-calibration/
+          if-no-files-found: warn
+          retention-days: 30
