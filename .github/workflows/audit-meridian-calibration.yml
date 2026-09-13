@@ -3,10 +3,10 @@ name: Audit Meridian story calibration
 on:
   workflow_dispatch:
     inputs:
-      phase_b_run_id:
-        description: Successful Phase B audit run to calibrate against
+      benchmark_run_id:
+        description: Successful Meridian BGE-M3 benchmark run to calibrate
         required: false
-        default: '34347651580'
+        default: '34361891419'
       sample_size:
         description: Ground-truth review sample size
         required: false
@@ -34,51 +34,41 @@ jobs:
         with:
           node-version: 22
 
-      - name: Download reproducible Phase B source artifact
+      - name: Download reproducible Meridian benchmark artifact
         uses: actions/download-artifact@v4
         with:
-          name: phase-b-event-extraction-${{ inputs.phase_b_run_id || '34347651580' }}
-          path: phase-b-source
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id || '34361891419' }}
+          path: meridian-benchmark
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.phase_b_run_id || '34347651580' }}
+          run-id: ${{ inputs.benchmark_run_id || '34361891419' }}
 
-      - name: Validate source and Cloudflare credentials
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Validate benchmark source
         run: |
           set -euo pipefail
-          for club in ol psg om; do
-            test -s "phase-b-source/${club}.json" || { echo "Missing ${club}.json in Phase B artifact"; exit 1; }
-          done
-          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Missing repository secret CLOUDFLARE_WORKERS_AI_API_TOKEN'; exit 1; }
-          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing repository secret CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          test -s meridian-benchmark/pairs-structured.json || { echo 'Missing pairs-structured.json'; exit 1; }
+          test -s meridian-benchmark/summary.json || { echo 'Missing summary.json'; exit 1; }
 
-      - name: Build calibration sample with BGE-M3
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Build calibration review sample
         run: |
           set -euo pipefail
           node scripts/calibrate-meridian-story-thresholds.mjs \
-            --source-dir phase-b-source \
+            --benchmark-dir meridian-benchmark \
             --out-dir phase-b-meridian-calibration \
             --sample-size "${{ inputs.sample_size || '120' }}"
 
       - name: Print calibration summary
         env:
-          PHASE_B_RUN_ID: ${{ inputs.phase_b_run_id || '34347651580' }}
+          BENCHMARK_RUN_ID: ${{ inputs.benchmark_run_id || '34361891419' }}
         run: |
           node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
           import fs from 'node:fs';
           const s = JSON.parse(fs.readFileSync('phase-b-meridian-calibration/summary.json', 'utf8'));
           console.log('# Club Actu — Meridian story calibration');
           console.log();
-          console.log(`Phase B source run: \`${process.env.PHASE_B_RUN_ID}\``);
+          console.log(`Meridian benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
           console.log(`Model: \`${s.model}\` · representation: \`${s.representation}\``);
-          console.log(`Unique EVENT_CANDIDATE: **${s.unique_events}**`);
-          console.log(`Football-shortlisted pairs: **${s.shortlisted_pairs}**`);
+          console.log(`Candidate pairs available in benchmark: **${s.available_pairs}**`);
           console.log(`Ground-truth review sample: **${s.sample_size}**`);
           console.log();
           console.log('| Score bin | Available | Selected |');
@@ -87,8 +77,8 @@ jobs:
             console.log(`| ${name} | ${row.available} | ${row.selected} |`);
           }
           console.log();
-          console.log('Artifact files include every shortlisted structured pair plus a deterministic stratified review sample with blank same/different labels.');
-          console.log('Audit-only: no D1 writes, no story writes, no production clustering, no cron.');
+          console.log('The review sample has blank same/different labels. Once labelled, the same script can score thresholds and a deterministic/ambiguous decision zone.');
+          console.log('Audit-only: no D1 writes, no story writes, no production clustering, no cron, no new Workers AI call.');
           NODE
 
       - name: Upload calibration artifact
