@@ -1,0 +1,96 @@
+name: Audit Meridian football anchor gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_run_id:
+        description: Full-shortlist Meridian benchmark run
+        required: false
+        default: '34832282142'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: meridian-football-anchor-gate-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Calibrate football anchor gate against reviewed pairs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download full-shortlist Meridian benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id || '34832282142' }}
+          path: meridian-benchmark
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.benchmark_run_id || '34832282142' }}
+
+      - name: Validate benchmark and reviewed labels
+        run: |
+          set -euo pipefail
+          test -s meridian-benchmark/pairs-structured.json
+          test -s meridian-benchmark/events.json
+          test -s test/fixtures/meridian-story-labels-v2.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p = JSON.parse(fs.readFileSync('meridian-benchmark/pairs-structured.json','utf8'));
+          const labels = JSON.parse(fs.readFileSync('test/fixtures/meridian-story-labels-v2.json','utf8'));
+          if (!Array.isArray(p.pairs) || p.pairs.length < 1000) throw new Error(`Expected full shortlist, got ${p.pairs?.length || 0}`);
+          if (!Array.isArray(labels.labels) || labels.labels.length !== 150) throw new Error(`Expected 150 reviewed labels, got ${labels.labels?.length || 0}`);
+          console.log(`shortlisted=${p.pairs.length} labels=${labels.labels.length} sentinels=${labels.sentinels?.length || 0}`);
+          NODE
+
+      - name: Run anchor-gate unit tests
+        run: node --test test/meridian-anchor-gate.test.js
+
+      - name: Audit gate variants
+        run: |
+          set -euo pipefail
+          node scripts/audit-meridian-anchor-gate.mjs \
+            --benchmark-dir meridian-benchmark \
+            --labels test/fixtures/meridian-story-labels-v2.json \
+            --out-dir phase-b-meridian-anchor-gate
+
+      - name: Print audit summary
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-meridian-anchor-gate/anchor-gate-summary.json','utf8'));
+          console.log('# Club Actu — Meridian football anchor gate');
+          console.log();
+          console.log(`Shortlisted pairs: **${s.shortlisted_pairs}**`);
+          console.log(`Reviewed labels used: **${s.labeled_pairs}** · excluded: **${s.excluded_labels}**`);
+          console.log(`Validation sentinels: **${s.sentinels}**`);
+          console.log(`Recommended audit variant: **${s.recommended_gate}**`);
+          console.log();
+          console.log('| Gate | Safe zone | LOW | HIGH | New-story precision | Auto-merge precision | Deterministic coverage | Sentinels | Full auto-merges | Blocked above HIGH |');
+          console.log('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|');
+          for (const g of s.gates) {
+            const r = g.recommended;
+            console.log(`| ${g.gate} | ${g.safe_zone_found ? 'yes' : 'no'} | ${r.low.toFixed(3)} | ${r.high.toFixed(3)} | ${(100*r.new_story_precision).toFixed(1)}% | ${(100*r.auto_merge_precision).toFixed(1)}% | ${(100*r.deterministic_coverage).toFixed(1)}% | ${g.sentinel_passed}/${g.sentinel_total} | ${g.full_shortlist_auto_merge_count} | ${g.full_shortlist_blocked_high_count} |`);
+          }
+          console.log();
+          console.log('Audit-only: no D1 writes, no story writes, no production clustering, no cron, no Workers AI call.');
+          NODE
+
+      - name: Upload anchor-gate audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-football-anchor-gate-${{ github.run_id }}
+          path: phase-b-meridian-anchor-gate/
+          if-no-files-found: warn
+          retention-days: 30
