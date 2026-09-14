@@ -18,28 +18,30 @@ test('endpoint relation respects labels and LOW/HIGH zones', () => {
   assert.equal(DEFAULT_HIGH, 0.660);
 });
 
-const event = (id, articleId, title) => ({
+const event = (id, articleId, title, family = 'transfer') => ({
   id,
   article: { id: articleId, title, published_at: '2026-09-01T12:00:00Z' },
   club_ids: ['ol'],
   event: {
-    family: 'transfer',
+    family,
     primary_people: ['Player A'],
     primary_clubs: ['OL'],
     relation_hints: {},
+    family_discriminator: null,
     evidence: { fragments: [title] },
+    lexical_fingerprint: { tokens: ['player', 'lyon', 'mercato'] },
   },
 });
 
-const pair = (a, b, hybrid) => ({
+const pair = (a, b, hybrid, familyA = 'transfer', familyB = 'transfer') => ({
   event_a: a,
   event_b: b,
   article_a: `article-${a}`,
   article_b: `article-${b}`,
   title_a: a,
   title_b: b,
-  family_a: 'transfer',
-  family_b: 'transfer',
+  family_a: familyA,
+  family_b: familyB,
   embedding: hybrid,
   lexical: 0,
   temporal: 1,
@@ -66,6 +68,24 @@ test('confirmed different endpoints expose their shared HIGH center as a bridge 
   assert.equal(audit.candidates[0].center.event_id, 'center');
   assert.equal(audit.candidates[0].risk, 'confirmed');
   assert.equal(audit.candidates[0].triads[0].gap_class, 'ground_truth_different');
+});
+
+test('family-incompatible HIGH edges are not allowed to manufacture bridge candidates', () => {
+  const events = [
+    event('center', 'article-center', 'Institutional center', 'institutional'),
+    event('left', 'article-left', 'Transfer left', 'transfer'),
+    event('right', 'article-right', 'Institutional right', 'institutional'),
+  ];
+  const pairs = [
+    pair('center', 'left', 0.75, 'institutional', 'transfer'),
+    pair('center', 'right', 0.74, 'institutional', 'institutional'),
+    pair('left', 'right', 0.50, 'transfer', 'institutional'),
+  ];
+  const audit = buildBridgeAudit(events, pairs, { labels: [] });
+
+  assert.equal(audit.summary.high_edges_blocked_by_family_compat, 1);
+  assert.equal(audit.summary.high_edge_count, 1);
+  assert.equal(audit.summary.bridge_candidate_count, 0);
 });
 
 test('same-article endpoints are ignored and labeled-same endpoints do not create false bridge alarms', () => {
