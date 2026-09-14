@@ -74,14 +74,17 @@ jobs:
           console.log();
           console.log(`Benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
           console.log(`Corpus: **${s.event_count} EVENT_CANDIDATE**, **${s.shortlisted_pair_count} shortlisted pairs**`);
-          console.log(`Thresholds: LOW **${s.low}** · HIGH **${s.high}**`);
-          console.log(`HIGH graph edges: **${s.high_edge_count}**`);
+          console.log(`Thresholds: LOW **${s.low}** · HIGH **${s.high}** · gate \`${s.family_gate}\``);
+          console.log(`Allowed HIGH graph edges: **${s.high_edge_count}** · blocked by family gate: **${s.high_edges_blocked_by_family_compat}**`);
           console.log();
           console.log(`Bridge candidates: **${s.bridge_candidate_count}**`);
           console.log(`- confirmed by reviewed different endpoints: **${s.confirmed_bridge_event_count}**`);
-          console.log(`- high risk (endpoint below LOW): **${s.high_risk_bridge_event_count}**`);
+          console.log(`- high risk (family block or endpoint below LOW): **${s.high_risk_bridge_event_count}**`);
           console.log(`- medium risk (endpoint in ambiguous zone): **${s.medium_risk_bridge_event_count}**`);
           console.log(`- review only (endpoint not shortlisted): **${s.review_bridge_event_count}**`);
+          console.log();
+          console.log(`Known Fofana bridge sentinel: **${s.known_fofana_bridge.pass ? 'PASS' : 'FAIL'}**` +
+            ` (endpoint=${s.known_fofana_bridge.endpoint_score}, label=${s.known_fofana_bridge.endpoint_label}, class=${s.known_fofana_bridge.gap_class})`);
           console.log();
           console.log('| Risk | Family | HIGH degree | Suspicious triads | Candidate |');
           console.log('|---|---|---:|---:|---|');
@@ -89,7 +92,8 @@ jobs:
             console.log(`| ${row.risk} | ${row.family} | ${row.high_degree} | ${row.suspicious_triad_count} | ${String(row.title).replaceAll('|', '\\|')} |`);
           }
           console.log();
-          console.log('This audit detects graph bridges only. It does not modify Phase B, STORY clustering, D1 or production data.');
+          console.log('This audit detects graph bridges only. Mixed-content indicators are review hints, not automatic evidence that Phase B is wrong.');
+          console.log('Audit-only: no Phase B mutation, no STORY mutation, no D1 write, no cron and no Workers AI call.');
           NODE
 
       - name: Upload bridge-event audit artifact
