@@ -1,0 +1,104 @@
+name: Audit Meridian streaming STORY
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_run_id:
+        description: Full-shortlist Meridian BGE-M3 benchmark run
+        required: false
+        default: '34832282142'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: meridian-streaming-story-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Replay EVENT_CANDIDATE into stable STORY clusters
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download full-shortlist Meridian benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id || '34832282142' }}
+          path: meridian-benchmark
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.benchmark_run_id || '34832282142' }}
+
+      - name: Validate benchmark and Workers AI credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -s meridian-benchmark/events.json || { echo 'Missing events.json'; exit 1; }
+          test -s meridian-benchmark/representations-structured.json || { echo 'Missing representations-structured.json'; exit 1; }
+          test -s meridian-benchmark/summary.json || { echo 'Missing summary.json'; exit 1; }
+          test -s test/fixtures/meridian-story-labels-v2.json || { echo 'Missing story calibration labels'; exit 1; }
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Missing CLOUDFLARE_WORKERS_AI_API_TOKEN'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+
+      - name: Run streaming STORY audit
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          node scripts/audit-meridian-streaming-story.mjs \
+            --benchmark-dir meridian-benchmark \
+            --labels test/fixtures/meridian-story-labels-v2.json \
+            --out-dir phase-b-meridian-streaming-story
+
+      - name: Print streaming STORY summary
+        env:
+          BENCHMARK_RUN_ID: ${{ inputs.benchmark_run_id || '34832282142' }}
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-meridian-streaming-story/streaming-story-summary.json', 'utf8'));
+          console.log('# Club Actu — Meridian streaming STORY audit');
+          console.log();
+          console.log(`Benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
+          console.log(`EVENT_CANDIDATE replayed: **${s.unique_events}**`);
+          console.log(`Fixed decision zone: **LOW ${s.low.toFixed(3)} / HIGH ${s.high.toFixed(3)}**`);
+          console.log(`Family gate: \`${s.family_gate}\``);
+          console.log();
+          console.log('| Mode | Anchor gate | Stories | Max size | Max span (days) | Centroid-pass / anchor-fail | Same recall | Different separation | Co-cluster precision |');
+          console.log('|---|---:|---:|---:|---:|---:|---:|---:|---:|');
+          for (const row of s.runs || []) {
+            const t = row.anchor_threshold == null ? 'none' : row.anchor_threshold.toFixed(3);
+            console.log(`| ${row.mode} | ${t} | ${row.metrics.story_count} | ${row.metrics.max_story_size} | ${row.metrics.max_story_span_days.toFixed(2)} | ${row.metrics.centroid_pass_anchor_fail} | ${(100 * row.evaluation.same_recall).toFixed(1)}% | ${(100 * row.evaluation.different_separation).toFixed(1)}% | ${(100 * row.evaluation.co_cluster_precision).toFixed(1)}% |`);
+          }
+          console.log();
+          if (s.recommended) {
+            const t = s.recommended.anchor_threshold == null ? 'none' : s.recommended.anchor_threshold.toFixed(3);
+            console.log(`Diagnostic recommendation: **mode=${s.recommended.mode}, anchor=${t}**.`);
+          }
+          console.log();
+          console.log('Conservative mode attaches only scores >= HIGH. Stress mode also attaches the ambiguous LOW..HIGH zone to expose centroid drift.');
+          console.log('The founder event and story_id remain immutable; the centroid alone evolves. Time is only a decaying score signal, never a hard veto.');
+          console.log('Audit-only: no D1 writes, no production stories, no cron. Workers AI is used only to regenerate the 194 BGE-M3 vectors needed for true centroid replay.');
+          NODE
+
+      - name: Upload streaming STORY audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-streaming-story-${{ github.run_id }}
+          path: phase-b-meridian-streaming-story/
+          if-no-files-found: warn
+          retention-days: 30
