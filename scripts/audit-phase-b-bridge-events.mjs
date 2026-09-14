@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractGateFeatures, familyCompatible } from './audit-meridian-anchor-gate.mjs';
 
 export const DEFAULT_LOW = 0.535;
 export const DEFAULT_HIGH = 0.660;
 
-const pairKey = (a, b) => [String(a), String(b)].sort().join(':');
+export const pairKey = (a, b) => [String(a), String(b)].sort().join(':');
 const arr = (value) => Array.isArray(value) ? value : [];
 const q = (value) => +Number(value ?? 0).toFixed(6);
 
@@ -18,38 +19,47 @@ function evidenceText(record) {
 
 function compactEvent(record) {
   const event = record?.event || {};
+  const evidence = event.evidence || {};
   return {
     event_id: record?.id || null,
     article_id: record?.article?.id || null,
     title: record?.article?.title || '',
     published_at: record?.article?.published_at || null,
     family: event.family || 'unknown',
+    stage: event.stage || 'unknown',
     primary_people: arr(event.primary_people),
     primary_clubs: arr(event.primary_clubs),
     relation_hints: event.relation_hints || {},
+    evidence_fragment_count: arr(evidence.fragments).length,
+    lexical_token_count: arr(event.lexical_fingerprint?.tokens).length,
     evidence: evidenceText(record).slice(0, 2600),
   };
 }
 
 function mixednessSignals(record) {
-  const event = record?.event || {};
-  const title = String(record?.article?.title || '');
-  const evidence = event.evidence || {};
-  const fragments = arr(evidence.fragments);
+  const meta = compactEvent(record);
   return {
-    people_count: arr(event.primary_people).length,
-    clubs_count: arr(event.primary_clubs).length,
-    evidence_fragment_count: fragments.length,
-    title_has_joiner: /\b(et|mais|avant|apres|après|puis|tandis que|alors que)\b|[,;:]/i.test(title),
-    has_from_and_to: Boolean(event.relation_hints?.club_from && event.relation_hints?.club_to),
+    people_count: meta.primary_people.length,
+    clubs_count: meta.primary_clubs.length,
+    evidence_fragment_count: meta.evidence_fragment_count,
+    title_has_joiner: /\b(et|mais|avant|apres|après|puis|tandis que|alors que)\b|[,;:]/i.test(meta.title),
+    has_from_and_to: Boolean(meta.relation_hints?.club_from && meta.relation_hints?.club_to),
   };
 }
 
-export function classifyEndpointRelation(directPair, label, low = DEFAULT_LOW, high = DEFAULT_HIGH) {
+function strongPair(pair, eventsById, high) {
+  if (Number(pair?.hybrid || 0) < high) return false;
+  return familyCompatible(extractGateFeatures(pair, eventsById));
+}
+
+export function classifyEndpointRelation(directPair, label, eventsById = null, low = DEFAULT_LOW, high = DEFAULT_HIGH) {
   if (label === 'exclude') return { suspicious: false, gap_class: 'excluded', endpoint_score: directPair?.hybrid ?? null };
   if (label === 'same') return { suspicious: false, gap_class: 'labeled_same', endpoint_score: directPair?.hybrid ?? null };
   if (label === 'different') return { suspicious: true, gap_class: 'ground_truth_different', endpoint_score: directPair?.hybrid ?? null };
   if (!directPair) return { suspicious: true, gap_class: 'not_shortlisted', endpoint_score: null };
+  if (eventsById && !familyCompatible(extractGateFeatures(directPair, eventsById))) {
+    return { suspicious: true, gap_class: 'family_block', endpoint_score: directPair.hybrid };
+  }
   if (directPair.hybrid < low) return { suspicious: true, gap_class: 'below_low', endpoint_score: directPair.hybrid };
   if (directPair.hybrid < high) return { suspicious: true, gap_class: 'ambiguous_gap', endpoint_score: directPair.hybrid };
   return { suspicious: false, gap_class: 'high_connected', endpoint_score: directPair.hybrid };
@@ -58,10 +68,11 @@ export function classifyEndpointRelation(directPair, label, low = DEFAULT_LOW, h
 function triadSeverity(triad) {
   const gap = triad.gap_class;
   const base = gap === 'ground_truth_different' ? 1000
-    : gap === 'below_low' ? 150
-      : gap === 'ambiguous_gap' ? 80
-        : gap === 'not_shortlisted' ? 40
-          : 0;
+    : gap === 'family_block' ? 220
+      : gap === 'below_low' ? 150
+        : gap === 'ambiguous_gap' ? 80
+          : gap === 'not_shortlisted' ? 40
+            : 0;
   const weak = triad.endpoint_score == null ? 0 : Math.max(0, DEFAULT_HIGH - triad.endpoint_score) * 100;
   const highStrength = Math.min(triad.center_to_a_score, triad.center_to_b_score) * 10;
   return base + weak + highStrength;
@@ -80,14 +91,18 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
   };
 
   let highEdges = 0;
+  let blockedHighEdges = 0;
   for (const pair of pairs) {
     const a = String(pair.event_a), b = String(pair.event_b);
     pairMap.set(pairKey(a, b), pair);
-    if (Number(pair.hybrid) >= high) {
-      highEdges++;
-      addNeighbor(a, b, pair);
-      addNeighbor(b, a, pair);
+    if (Number(pair.hybrid) < high) continue;
+    if (!strongPair(pair, eventsById, high)) {
+      blockedHighEdges++;
+      continue;
     }
+    highEdges++;
+    addNeighbor(a, b, pair);
+    addNeighbor(b, a, pair);
   }
 
   const labels = new Map(arr(truth.labels).map((row) => [String(row.pair_id), row.label]));
@@ -106,13 +121,14 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
         const endpointKey = pairKey(left.event_id, right.event_id);
         const direct = pairMap.get(endpointKey) || null;
         const label = labels.get(endpointKey) || null;
-        const relation = classifyEndpointRelation(direct, label, low, high);
+        const relation = classifyEndpointRelation(direct, label, eventsById, low, high);
         if (!relation.suspicious) continue;
 
         const triad = {
           center_event_id: centerId,
           endpoint_a_event_id: left.event_id,
           endpoint_b_event_id: right.event_id,
+          endpoint_pair_id: endpointKey,
           center_to_a_score: q(left.pair.hybrid),
           center_to_b_score: q(right.pair.hybrid),
           endpoint_score: relation.endpoint_score == null ? null : q(relation.endpoint_score),
@@ -140,12 +156,13 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
     const record = eventsById.get(centerId);
     const counts = {
       ground_truth_different: rows.filter((row) => row.gap_class === 'ground_truth_different').length,
+      family_block: rows.filter((row) => row.gap_class === 'family_block').length,
       below_low: rows.filter((row) => row.gap_class === 'below_low').length,
       ambiguous_gap: rows.filter((row) => row.gap_class === 'ambiguous_gap').length,
       not_shortlisted: rows.filter((row) => row.gap_class === 'not_shortlisted').length,
     };
     const risk = counts.ground_truth_different > 0 ? 'confirmed'
-      : counts.below_low > 0 ? 'high'
+      : counts.family_block > 0 || counts.below_low > 0 ? 'high'
         : counts.ambiguous_gap > 0 ? 'medium'
           : 'review';
     return {
@@ -168,12 +185,21 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
   const medium = candidates.filter((row) => row.risk === 'medium');
   const review = candidates.filter((row) => row.risk === 'review');
 
+  const knownBridge = {
+    center_event_id: '1c0acf06449b7c7a45ff75c0',
+    endpoint_pair_id: pairKey('24ce94393700c7d189bd371d', '33967dcba466bea72dfb0204'),
+  };
+  const knownCandidate = candidates.find((row) => row.center.event_id === knownBridge.center_event_id);
+  const knownTriad = knownCandidate?.triads.find((row) => row.endpoint_pair_id === knownBridge.endpoint_pair_id) || null;
+
   return {
     summary: {
       low, high,
+      family_gate: 'family_compat',
       event_count: events.length,
       shortlisted_pair_count: pairs.length,
       high_edge_count: highEdges,
+      high_edges_blocked_by_family_compat: blockedHighEdges,
       bridge_candidate_count: candidates.length,
       confirmed_bridge_event_count: confirmed.length,
       high_risk_bridge_event_count: highRisk.length,
@@ -181,9 +207,17 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
       review_bridge_event_count: review.length,
       suspicious_triad_count: triads.length,
       ground_truth_conflict_triad_count: triads.filter((row) => row.gap_class === 'ground_truth_different').length,
+      family_block_triad_count: triads.filter((row) => row.gap_class === 'family_block').length,
       below_low_triad_count: triads.filter((row) => row.gap_class === 'below_low').length,
       ambiguous_gap_triad_count: triads.filter((row) => row.gap_class === 'ambiguous_gap').length,
       not_shortlisted_triad_count: triads.filter((row) => row.gap_class === 'not_shortlisted').length,
+      known_fofana_bridge: {
+        found: Boolean(knownTriad),
+        endpoint_score: knownTriad?.endpoint_score ?? null,
+        endpoint_label: knownTriad?.endpoint_label ?? null,
+        gap_class: knownTriad?.gap_class ?? null,
+        pass: Boolean(knownTriad && knownTriad.endpoint_label === 'different' && knownTriad.gap_class === 'ground_truth_different'),
+      },
       top_candidates: candidates.slice(0, 12).map((row) => ({
         event_id: row.center.event_id,
         title: row.center.title,
@@ -192,6 +226,7 @@ export function buildBridgeAudit(events, pairs, truth = {}, options = {}) {
         high_degree: row.high_degree,
         suspicious_triad_count: row.suspicious_triad_count,
         counts: row.counts,
+        mixedness_signals: row.mixedness_signals,
       })),
     },
     candidates,
@@ -223,6 +258,7 @@ async function main() {
   fs.writeFileSync(path.join(outDir, 'bridge-triads.json'), JSON.stringify(audit.triads, null, 2));
 
   console.log(JSON.stringify(audit.summary, null, 2));
+  if (!audit.summary.known_fofana_bridge.pass) throw new Error('Known Fofana bridge sentinel was not reproduced');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
