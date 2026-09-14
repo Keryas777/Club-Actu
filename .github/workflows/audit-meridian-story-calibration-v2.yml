@@ -1,0 +1,93 @@
+name: Audit Meridian story calibration v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_run_id:
+        description: Full-shortlist Meridian BGE-M3 benchmark run to calibrate
+        required: true
+      sample_size:
+        description: Ground-truth review sample size
+        required: false
+        default: '150'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: meridian-story-calibration-v2-manual
+  cancel-in-progress: false
+
+jobs:
+  calibration:
+    name: Build full-spectrum Meridian calibration sample
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download full-shortlist Meridian benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id }}
+          path: meridian-benchmark
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.benchmark_run_id }}
+
+      - name: Validate benchmark source
+        run: |
+          set -euo pipefail
+          test -s meridian-benchmark/pairs-structured.json || { echo 'Missing pairs-structured.json'; exit 1; }
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p = JSON.parse(fs.readFileSync('meridian-benchmark/pairs-structured.json','utf8'));
+          if (!Array.isArray(p.pairs) || p.pairs.length < 160) throw new Error('Expected full shortlisted pair export in pairs[]');
+          console.log(`Full shortlisted pairs available: ${p.pairs.length}`);
+          NODE
+
+      - name: Build 150-pair calibration review sample
+        run: |
+          set -euo pipefail
+          node scripts/calibrate-meridian-story-thresholds-v2.mjs \
+            --benchmark-dir meridian-benchmark \
+            --out-dir phase-b-meridian-calibration \
+            --sample-size "${{ inputs.sample_size || '150' }}"
+
+      - name: Print calibration summary
+        env:
+          BENCHMARK_RUN_ID: ${{ inputs.benchmark_run_id }}
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-meridian-calibration/summary.json','utf8'));
+          console.log('# Club Actu — Meridian story calibration v2');
+          console.log();
+          console.log(`Benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
+          console.log(`Available shortlisted pairs: **${s.available_pairs}**`);
+          console.log(`Review sample: **${s.sample_size}** = ${s.broad_spectrum_target} spectrum + ${s.decision_focus_target} decision-focus`);
+          console.log(`Pair scope: \`${s.source_pair_scope}\``);
+          console.log(`Score range: **${s.score_range.min.toFixed(4)} → ${s.score_range.max.toFixed(4)}**`);
+          console.log();
+          console.log('| Score quantile | Available | Selected |');
+          console.log('|---|---:|---:|');
+          for (const [name,row] of Object.entries(s.sample_bins || {})) console.log(`| ${name} | ${row.available} | ${row.selected} |`);
+          console.log();
+          console.log('Labels accepted later: same / different / exclude. Excluded rows do not affect threshold metrics.');
+          console.log('Audit-only: no D1 writes, no story writes, no production clustering and no cron.');
+          NODE
+
+      - name: Upload calibration artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-story-calibration-v2-${{ github.run_id }}
+          path: phase-b-meridian-calibration/
+          if-no-files-found: warn
+          retention-days: 30
