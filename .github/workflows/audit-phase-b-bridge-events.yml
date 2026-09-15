@@ -1,0 +1,106 @@
+name: Audit Phase B bridge events
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_run_id:
+        description: Full-shortlist Meridian benchmark run
+        required: false
+        default: '34832282142'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: phase-b-bridge-event-audit-manual
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Detect EVENT_CANDIDATE bridge risks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download reproducible full-shortlist benchmark
+        uses: actions/download-artifact@v4
+        with:
+          name: meridian-bge-m3-benchmark-${{ inputs.benchmark_run_id || '34832282142' }}
+          path: meridian-benchmark
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.benchmark_run_id || '34832282142' }}
+
+      - name: Validate audit inputs
+        run: |
+          set -euo pipefail
+          test -s meridian-benchmark/pairs-structured.json || { echo 'Missing pairs-structured.json'; exit 1; }
+          test -s meridian-benchmark/events.json || { echo 'Missing events.json'; exit 1; }
+          test -s test/fixtures/meridian-story-labels-v2.json || { echo 'Missing reviewed labels fixture'; exit 1; }
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p = JSON.parse(fs.readFileSync('meridian-benchmark/pairs-structured.json', 'utf8'));
+          const e = JSON.parse(fs.readFileSync('meridian-benchmark/events.json', 'utf8'));
+          if (!Array.isArray(p.pairs) || p.pairs.length < 1000) throw new Error(`Expected full shortlist, got ${p.pairs?.length || 0} pairs`);
+          if (!Array.isArray(e) || e.length < 150) throw new Error(`Expected full event corpus, got ${e?.length || 0} events`);
+          console.log(`Inputs OK: ${e.length} events, ${p.pairs.length} pairs`);
+          NODE
+
+      - name: Run targeted bridge-event audit
+        run: |
+          set -euo pipefail
+          node scripts/audit-phase-b-bridge-events.mjs \
+            --benchmark-dir meridian-benchmark \
+            --labels test/fixtures/meridian-story-labels-v2.json \
+            --out-dir phase-b-bridge-events \
+            --low 0.535 \
+            --high 0.660
+
+      - name: Print audit summary
+        env:
+          BENCHMARK_RUN_ID: ${{ inputs.benchmark_run_id || '34832282142' }}
+        run: |
+          node --input-type=module <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import fs from 'node:fs';
+          const s = JSON.parse(fs.readFileSync('phase-b-bridge-events/bridge-event-summary.json', 'utf8'));
+          console.log('# Club Actu — targeted Phase B bridge-event audit');
+          console.log();
+          console.log(`Benchmark run: \`${process.env.BENCHMARK_RUN_ID}\``);
+          console.log(`Corpus: **${s.event_count} EVENT_CANDIDATE**, **${s.shortlisted_pair_count} shortlisted pairs**`);
+          console.log(`Thresholds: LOW **${s.low}** · HIGH **${s.high}** · gate \`${s.family_gate}\``);
+          console.log(`Allowed HIGH graph edges: **${s.high_edge_count}** · blocked by family gate: **${s.high_edges_blocked_by_family_compat}**`);
+          console.log();
+          console.log(`Bridge candidates: **${s.bridge_candidate_count}**`);
+          console.log(`- confirmed by reviewed different endpoints: **${s.confirmed_bridge_event_count}**`);
+          console.log(`- high risk (family block or endpoint below LOW): **${s.high_risk_bridge_event_count}**`);
+          console.log(`- medium risk (endpoint in ambiguous zone): **${s.medium_risk_bridge_event_count}**`);
+          console.log(`- review only (endpoint not shortlisted): **${s.review_bridge_event_count}**`);
+          console.log();
+          console.log(`Known Fofana bridge sentinel: **${s.known_fofana_bridge.pass ? 'PASS' : 'FAIL'}**` +
+            ` (endpoint=${s.known_fofana_bridge.endpoint_score}, label=${s.known_fofana_bridge.endpoint_label}, class=${s.known_fofana_bridge.gap_class})`);
+          console.log();
+          console.log('| Risk | Family | HIGH degree | Suspicious triads | Candidate |');
+          console.log('|---|---|---:|---:|---|');
+          for (const row of s.top_candidates || []) {
+            console.log(`| ${row.risk} | ${row.family} | ${row.high_degree} | ${row.suspicious_triad_count} | ${String(row.title).replaceAll('|', '\\|')} |`);
+          }
+          console.log();
+          console.log('This audit detects graph bridges only. Mixed-content indicators are review hints, not automatic evidence that Phase B is wrong.');
+          console.log('Audit-only: no Phase B mutation, no STORY mutation, no D1 write, no cron and no Workers AI call.');
+          NODE
+
+      - name: Upload bridge-event audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-b-bridge-events-${{ github.run_id }}
+          path: phase-b-bridge-events/
+          if-no-files-found: warn
+          retention-days: 30
