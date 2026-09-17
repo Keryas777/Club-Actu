@@ -88,6 +88,40 @@ async function phaseBEventPreviewEndpoint(env, club, limit, offset, articleId) {
   }
 }
 
+async function phaseBEventPersistenceEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const articleId = (url.searchParams.get("article_id") || "").trim();
+  if (!articleId) {
+    return json({ ok: false, error: "article_id is required" }, { status: 400 });
+  }
+
+  try {
+    // D1 persistence remains manual at this stage. Nothing here is connected to
+    // the scheduled pipeline or to STORY matching.
+    const { persistPhaseBEventCandidatesForArticle } = await import("./phase-b-event-persistence.js");
+    const result = await persistPhaseBEventCandidatesForArticle(env.DB, articleId);
+    return json({ ok: true, trigger: "persist_phase_b_event_candidates", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("phase-b-event-persistence failed", { name, message, articleId });
+    return json({
+      ok: false,
+      error: "phase_b_event_persistence_failed",
+      diagnostic: { name, message, article_id: articleId }
+    }, { status: 500 });
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -112,6 +146,10 @@ export default {
       const offset = parseOffset(url, 0, 5000);
       const articleId = (url.searchParams.get("article_id") || "").trim() || null;
       return phaseBEventPreviewEndpoint(env, club, limit, offset, articleId);
+    }
+
+    if (url.pathname === "/api/persist-phase-b-events" && request.method === "POST") {
+      return phaseBEventPersistenceEndpoint(request, env, url);
     }
 
     return baseWorker.fetch(request, env, ctx);
