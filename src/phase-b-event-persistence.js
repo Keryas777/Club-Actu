@@ -422,6 +422,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
   let ambiguousClubAnchors = 0;
   let unmatchedClubAnchors = 0;
   let trackedClubLinks = 0;
+  let eventsWithoutTrackedClub = 0;
 
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
@@ -443,6 +444,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     ambiguousClubAnchors += resolved.ambiguousAnchors.length;
     unmatchedClubAnchors += resolved.unmatchedAnchors.length;
     trackedClubLinks += resolved.clubIds.length;
+    if (!resolved.clubIds.length) eventsWithoutTrackedClub++;
     const desired = new Set(resolved.clubIds);
     const current = existingClubLinks.get(record.id) || new Set();
 
@@ -495,6 +497,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     tracked_club_links: trackedClubLinks,
     ambiguous_club_anchor_count: ambiguousClubAnchors,
     unmatched_club_anchor_count: unmatchedClubAnchors,
+    events_without_tracked_club: eventsWithoutTrackedClub,
     writes_executed: statements.length,
     ...stats
   };
