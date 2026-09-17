@@ -1,0 +1,185 @@
+name: Test Phase B event persistence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-b-event-persistence-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Persist one EVENT article twice
+    runs-on: ubuntu-latest
+
+    env:
+      BASE_URL: https://club-actu.deliriousfan7.workers.dev
+      MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+
+    steps:
+      - name: Check manual trigger secret
+        run: |
+          set -euo pipefail
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+      - name: Select one recent article with EVENT candidates
+        id: select
+        run: |
+          set -euo pipefail
+          mkdir -p phase-b-event-persistence-smoke
+
+          selected=""
+          selected_club=""
+          selected_title=""
+
+          for club in ol psg om; do
+            file="phase-b-event-persistence-smoke/preview-${club}.json"
+            curl --fail-with-body --silent --show-error \
+              "$BASE_URL/api/phase-b-event-preview?club=$club&limit=20&offset=0" \
+              -o "$file"
+
+            result="$(python3 - "$file" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          for row in data.get('articles') or []:
+              events = row.get('events') or []
+              if not events:
+                  continue
+              article = row.get('article') or {}
+              article_id = str(article.get('id') or '').strip()
+              if not article_id:
+                  continue
+              title = str(article.get('title') or '').replace('\t', ' ').replace('\n', ' ').strip()
+              print(article_id + '\t' + title)
+              break
+          PY
+            )"
+
+            if [ -n "$result" ]; then
+              selected="${result%%$'\t'*}"
+              selected_title="${result#*$'\t'}"
+              selected_club="$club"
+              break
+            fi
+          done
+
+          if [ -z "$selected" ]; then
+            echo "No recent event-producing article found in OL/PSG/OM previews."
+            exit 1
+          fi
+
+          echo "article_id=$selected" >> "$GITHUB_OUTPUT"
+          echo "club=$selected_club" >> "$GITHUB_OUTPUT"
+          echo "title=$selected_title" >> "$GITHUB_OUTPUT"
+          echo "Selected $selected_club article: $selected — $selected_title"
+
+      - name: Persist selected article twice
+        env:
+          ARTICLE_ID: ${{ steps.select.outputs.article_id }}
+        run: |
+          set -euo pipefail
+
+          encoded_article_id="$(python3 - <<'PY'
+          import os, urllib.parse
+          print(urllib.parse.quote(os.environ['ARTICLE_ID'], safe=''))
+          PY
+          )"
+
+          for pass in first second; do
+            body="phase-b-event-persistence-smoke/${pass}.json"
+            status="$(curl --silent --show-error \
+              --output "$body" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+              --header "Accept: application/json" \
+              "$BASE_URL/api/persist-phase-b-events?article_id=$encoded_article_id")"
+
+            echo "===== $pass persistence — HTTP $status ====="
+            cat "$body"
+            echo
+
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Persistence pass '$pass' failed with HTTP $status"
+              exit 1
+            fi
+          done
+
+      - name: Verify real D1 idempotence
+        env:
+          ARTICLE_ID: ${{ steps.select.outputs.article_id }}
+          CLUB: ${{ steps.select.outputs.club }}
+          TITLE: ${{ steps.select.outputs.title }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee phase-b-event-persistence-smoke/verification.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          first = json.load(open('phase-b-event-persistence-smoke/first.json', encoding='utf-8'))
+          second = json.load(open('phase-b-event-persistence-smoke/second.json', encoding='utf-8'))
+
+          errors = []
+          for name, payload in [('first', first), ('second', second)]:
+              if payload.get('ok') is not True:
+                  errors.append(f'{name}: ok is not true')
+              if payload.get('status') != 'persisted':
+                  errors.append(f'{name}: status={payload.get("status")!r}, expected persisted')
+              if int(payload.get('event_count') or 0) < 1:
+                  errors.append(f'{name}: event_count must be >= 1')
+
+          if first.get('article_id') != second.get('article_id'):
+              errors.append('article_id changed between passes')
+          if first.get('phase_b_input_hash') != second.get('phase_b_input_hash'):
+              errors.append('phase_b_input_hash changed between immediate replays')
+          if first.get('event_count') != second.get('event_count'):
+              errors.append('event_count changed between immediate replays')
+
+          second_writes = int(second.get('writes_executed') or 0)
+          if second_writes != 0:
+              errors.append(f'second pass wrote {second_writes} rows/statements; expected 0')
+
+          second_events = int(second.get('event_count') or 0)
+          second_unchanged = int(second.get('unchanged') or 0)
+          if second_unchanged != second_events:
+              errors.append(
+                  f'second pass unchanged={second_unchanged}, event_count={second_events}; expected equality'
+              )
+
+          print('# Club Actu — real EVENT persistence smoke test')
+          print()
+          print(f'- Club preview: **{os.environ.get("CLUB", "").upper()}**')
+          print(f'- Article: `{os.environ.get("ARTICLE_ID", "")}`')
+          print(f'- Title: {os.environ.get("TITLE", "")}')
+          print(f'- EVENT candidates: **{first.get("event_count", 0)}**')
+          print(f'- First pass writes: **{first.get("writes_executed", 0)}**')
+          print(f'- First pass inserts: **{first.get("inserted", 0)}**')
+          print(f'- First pass club links added: **{first.get("club_links_added", 0)}**')
+          print(f'- EVENTs without tracked club: **{first.get("events_without_tracked_club", 0)}**')
+          print(f'- Second pass writes: **{second_writes}**')
+          print(f'- Second pass unchanged: **{second_unchanged}/{second_events}**')
+          print()
+
+          if errors:
+              print('## FAILED')
+              for error in errors:
+                  print(f'- {error}')
+              raise SystemExit(1)
+
+          print('## PASS')
+          print('The immediate replay performed zero D1 writes and all EVENT candidates were unchanged.')
+          PY
+
+      - name: Upload smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-b-event-persistence-smoke-${{ github.run_id }}
+          path: phase-b-event-persistence-smoke/
+          if-no-files-found: warn
+          retention-days: 30
