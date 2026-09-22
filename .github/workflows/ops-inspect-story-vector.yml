@@ -33,7 +33,8 @@ jobs:
               event_id,
               typeof(vector) AS storage_type,
               length(vector) AS storage_length,
-              hex(substr(vector, 1, 16)) AS hex_prefix,
+              substr(vector, 1, 100) AS text_prefix,
+              length(vector) - length(replace(vector, ',', '')) AS comma_count,
               dimension,
               encoding,
               status
