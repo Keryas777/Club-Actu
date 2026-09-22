@@ -27,6 +27,8 @@ jobs:
           node --check src/index-phase-a-fix.js
           node --check src/phase-b-event-persistence.js
           node --check src/phase-b-event-queue.js
+          node --check src/story-event-representation.js
+          node --check src/event-embedding-queue.js
 
       - name: Run unit tests
         run: npm test
