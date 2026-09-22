@@ -106,7 +106,8 @@ export async function processPhaseBEventPersistenceBatch(db, options = {}) {
     };
   }
 
-  const clubs = await loadPhaseBClubContext(db);
+  const clubs = options.clubs || await loadPhaseBClubContext(db);
+  const persistArticle = options.persistArticle || persistPhaseBEventCandidatesForArticle;
   const totals = {
     candidates: articleIds.length,
     processed: 0,
@@ -126,7 +127,7 @@ export async function processPhaseBEventPersistenceBatch(db, options = {}) {
     }
 
     try {
-      const result = await persistPhaseBEventCandidatesForArticle(db, articleId, {
+      const result = await persistArticle(db, articleId, {
         clubs,
         leaseMs: 120000
       });
