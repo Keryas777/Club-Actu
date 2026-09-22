@@ -1,0 +1,44 @@
+name: Ops inspect STORY vector storage
+
+on:
+  push:
+    branches:
+      - "codex/d1-story-v1"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Inspect remote D1 embedding storage
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx wrangler d1 execute DB --remote --json --command "
+            SELECT
+              id,
+              event_id,
+              typeof(vector) AS storage_type,
+              length(vector) AS storage_length,
+              hex(substr(vector, 1, 16)) AS hex_prefix,
+              dimension,
+              encoding,
+              status
+            FROM event_embeddings
+            WHERE status = 'ready' AND vector IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 4;
+          "
