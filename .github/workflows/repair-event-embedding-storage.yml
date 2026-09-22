@@ -7,6 +7,9 @@ on:
         description: "Maximum legacy TEXT embeddings to repair (1-50)"
         required: false
         default: "20"
+  push:
+    branches:
+      - "codex/d1-story-v1-blob-fix"
 
 permissions:
   contents: read
