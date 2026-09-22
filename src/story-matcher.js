@@ -305,6 +305,12 @@ async function markMatchFailure(db, event, error, metrics) {
   return status;
 }
 
+export function isFinalStoryMatchStatus(status) {
+  return status === 'auto_new_story'
+    || status === 'auto_attach'
+    || status === 'ambiguous_ai';
+}
+
 async function existingEventOutcome(db, eventId, metrics) {
   const rows = await queryAll(db, `
     SELECT
@@ -399,6 +405,7 @@ export async function processStoryMatchBatch(db, options = {}) {
   const rows = await loadReadyStoryMatchEvents(db, { limit, eventId }, metrics);
   if (!rows.length && eventId) {
     const existing = await existingEventOutcome(db, eventId, metrics);
+    const alreadyFinal = Boolean(existing && isFinalStoryMatchStatus(existing.match_status));
     return {
       matcher_version: STORY_MATCHER_VERSION,
       candidates: 0,
@@ -407,16 +414,18 @@ export async function processStoryMatchBatch(db, options = {}) {
       auto_new_story: 0,
       auto_attach: 0,
       ambiguous_ai: 0,
-      reused: existing ? 1 : 0,
+      reused: alreadyFinal ? 1 : 0,
       deferred: 0,
       retry: 0,
       failed: 0,
-      stop_reason: existing ? 'already_final' : 'event_not_eligible',
+      stop_reason: alreadyFinal ? 'already_final' : 'event_not_eligible',
       d1_queries: metrics.queries,
       d1_rows_read: metrics.rows_read,
       d1_write_statements: metrics.write_statements,
       d1_rows_written: metrics.rows_written,
-      examples: existing ? [{ status: 'already_final', ...existing }] : []
+      examples: existing
+        ? [{ status: alreadyFinal ? 'already_final' : 'not_eligible', ...existing }]
+        : []
     };
   }
   const totals = {
