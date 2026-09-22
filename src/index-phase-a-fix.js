@@ -145,6 +145,39 @@ async function scheduledPhaseBEventPersistence(env) {
   }
 }
 
+async function eventEmbeddingBatchEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.AI) return json({ ok: false, error: "Workers AI binding missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const limit = parseLimit(url, 4, 12);
+
+  try {
+    const { processEventEmbeddingBatch } = await import("./event-embedding-queue.js");
+    const result = await processEventEmbeddingBatch(env.DB, env.AI, {
+      limit,
+      maxDurationMs: 12000
+    });
+    return json({ ok: true, trigger: "process_event_embedding_batch", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("event-embedding-batch failed", { name, message, limit });
+    return json({
+      ok: false,
+      error: "event_embedding_batch_failed",
+      diagnostic: { name, message, limit }
+    }, { status: 500 });
+  }
+}
+
 async function phaseBEventPersistenceEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -211,6 +244,10 @@ export default {
 
     if (url.pathname === "/api/process-phase-b-event-batch" && request.method === "POST") {
       return phaseBEventBatchEndpoint(request, env, url);
+    }
+
+    if (url.pathname === "/api/process-event-embedding-batch" && request.method === "POST") {
+      return eventEmbeddingBatchEndpoint(request, env, url);
     }
 
     return baseWorker.fetch(request, env, ctx);
