@@ -4,7 +4,7 @@ import {
   extractEventCandidates
 } from './phase-b-events-targeted.js';
 
-export const EVENT_PERSISTENCE_VERSION = 'phase-b-event-persistence-v1';
+export const EVENT_PERSISTENCE_VERSION = 'phase-b-event-persistence-v2';
 const PHASE_A_EXTRACTOR_VERSION = 'phase-a-extractor-v1';
 const PHASE_A_RULE_VERSION = 'phase-a-relevance-v3';
 
@@ -46,6 +46,30 @@ function normalizedSorted(values = []) {
       .map((value) => normalizeTopicText(value))
       .filter(Boolean)
   )].sort();
+}
+
+function normalizedClubContext(clubs = []) {
+  return clubs
+    .map((club) => ({
+      id: club.id,
+      name: club.name,
+      aliases: normalizedSorted(club.aliases || [])
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function articleProcessingInput(article) {
+  return {
+    extractor_version: EVENT_EXTRACTOR_VERSION,
+    article: {
+      id: article.id,
+      title: article.title || '',
+      published_at: article.published_at || null,
+      excerpt: article.excerpt || '',
+      content: article.content || '',
+      content_source: article.content_source || 'none'
+    }
+  };
 }
 
 function canonicalEventForIdentity(article, event) {
@@ -169,26 +193,18 @@ export function resolveTrackedClubIds(event, clubs = []) {
   };
 }
 
-export async function buildPhaseBInputHash(article, clubs = []) {
-  const context = clubs
-    .map((club) => ({
-      id: club.id,
-      name: club.name,
-      aliases: normalizedSorted(club.aliases || [])
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+export async function buildArticleEventProcessingHash(article) {
+  return sha256Hex(stableStringify(articleProcessingInput(article)));
+}
 
+export async function buildPhaseBClubContextHash(clubs = []) {
+  return sha256Hex(stableStringify(normalizedClubContext(clubs)));
+}
+
+export async function buildPhaseBInputHash(article, clubs = []) {
   return sha256Hex(stableStringify({
-    extractor_version: EVENT_EXTRACTOR_VERSION,
-    article: {
-      id: article.id,
-      title: article.title || '',
-      published_at: article.published_at || null,
-      excerpt: article.excerpt || '',
-      content: article.content || '',
-      content_source: article.content_source || 'none'
-    },
-    clubs: context
+    ...articleProcessingInput(article),
+    clubs: normalizedClubContext(clubs)
   }));
 }
 
@@ -250,6 +266,26 @@ async function loadArticleForPersistence(db, articleId) {
   return results?.[0] || null;
 }
 
+async function loadCompletedArticleEventRun(db, articleId, processingInputHash) {
+  const { results } = await db.prepare(`
+    SELECT
+      id,
+      phase_b_input_hash,
+      club_context_hash,
+      input_source,
+      event_count,
+      completed_at
+    FROM article_event_candidate_runs
+    WHERE article_id = ?
+      AND processing_input_hash = ?
+      AND extractor_version = ?
+      AND status = 'completed'
+    LIMIT 1
+  `).bind(articleId, processingInputHash, EVENT_EXTRACTOR_VERSION).all();
+
+  return results?.[0] || null;
+}
+
 async function loadExistingArticleEvents(db, articleId) {
   const { results } = await db.prepare(`
     SELECT id, lifecycle_status, source_content_hash, phase_b_input_source,
@@ -274,6 +310,45 @@ async function loadExistingClubLinks(db, articleId) {
     links.get(row.event_id).add(row.club_id);
   }
   return links;
+}
+
+function insertArticleEventRunStatement(db, {
+  article,
+  processingInputHash,
+  phaseBInputHash,
+  clubContextHash,
+  eventCount
+}) {
+  return db.prepare(`
+    INSERT INTO article_event_candidate_runs (
+      article_id,
+      source_content_hash,
+      processing_input_hash,
+      phase_b_input_hash,
+      club_context_hash,
+      input_source,
+      extractor_version,
+      status,
+      event_count,
+      attempts,
+      started_at,
+      completed_at,
+      updated_at
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?,
+      'completed', ?, 1,
+      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    )
+  `).bind(
+    article.id,
+    article.source_content_hash || '',
+    processingInputHash,
+    phaseBInputHash,
+    clubContextHash,
+    article.content_source || 'none',
+    EVENT_EXTRACTOR_VERSION,
+    eventCount
+  );
 }
 
 function insertEventStatement(db, record) {
@@ -390,7 +465,46 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     };
   }
 
-  const inputHash = await buildPhaseBInputHash(article, clubs);
+  const [processingInputHash, clubContextHash, inputHash] = await Promise.all([
+    buildArticleEventProcessingHash(article),
+    buildPhaseBClubContextHash(clubs),
+    buildPhaseBInputHash(article, clubs)
+  ]);
+
+  const completedRun = options.ignoreCompletedRun
+    ? null
+    : await loadCompletedArticleEventRun(db, article.id, processingInputHash);
+
+  if (completedRun) {
+    const storedEventCount = Number(completedRun.event_count || 0);
+    return {
+      article_id: article.id,
+      status: 'persisted',
+      persistence_version: EVENT_PERSISTENCE_VERSION,
+      extractor_version: EVENT_EXTRACTOR_VERSION,
+      content_source: completedRun.input_source || article.content_source || 'none',
+      processing_input_hash: processingInputHash,
+      phase_b_input_hash: completedRun.phase_b_input_hash,
+      club_context_hash: completedRun.club_context_hash,
+      current_club_context_hash: clubContextHash,
+      club_context_changed: completedRun.club_context_hash !== clubContextHash,
+      already_completed: true,
+      event_count: storedEventCount,
+      tracked_club_links: 0,
+      ambiguous_club_anchor_count: 0,
+      unmatched_club_anchor_count: 0,
+      events_without_tracked_club: 0,
+      writes_executed: 0,
+      inserted: 0,
+      refreshed: 0,
+      reactivated: 0,
+      unchanged: storedEventCount,
+      superseded: 0,
+      club_links_added: 0,
+      club_links_removed: 0
+    };
+  }
+
   const extractor = options.extractor || extractEventCandidates;
   const events = extractor(article, { clubs }) || [];
   const records = await Promise.all(events.map((event) =>
@@ -484,6 +598,16 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     stats.superseded++;
   }
 
+  statements.push(
+    insertArticleEventRunStatement(db, {
+      article,
+      processingInputHash,
+      phaseBInputHash: inputHash,
+      clubContextHash,
+      eventCount: records.length
+    })
+  );
+
   if (statements.length) await db.batch(statements);
 
   return {
@@ -492,7 +616,12 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     persistence_version: EVENT_PERSISTENCE_VERSION,
     extractor_version: EVENT_EXTRACTOR_VERSION,
     content_source: article.content_source || 'none',
+    processing_input_hash: processingInputHash,
     phase_b_input_hash: inputHash,
+    club_context_hash: clubContextHash,
+    current_club_context_hash: clubContextHash,
+    club_context_changed: false,
+    already_completed: false,
     event_count: records.length,
     tracked_club_links: trackedClubLinks,
     ambiguous_club_anchor_count: ambiguousClubAnchors,
