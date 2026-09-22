@@ -178,6 +178,25 @@ async function eventEmbeddingBatchEndpoint(request, env, url) {
   }
 }
 
+async function scheduledEventEmbeddings(env) {
+  if (!env.DB || !env.AI) return null;
+  try {
+    const { processEventEmbeddingBatch } = await import("./event-embedding-queue.js");
+    const result = await processEventEmbeddingBatch(env.DB, env.AI, {
+      limit: Number(env.EVENT_EMBEDDING_BATCH_LIMIT || 4),
+      maxDurationMs: Number(env.EVENT_EMBEDDING_MAX_DURATION_MS || 12000)
+    });
+    console.log("event-embedding-batch", result);
+    return result;
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    // Embedding production must never break collection / Phase A / EVENT persistence.
+    console.error("event-embedding-batch failed", { name, message });
+    return { ok: false, name, message };
+  }
+}
+
 async function phaseBEventPersistenceEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -268,5 +287,8 @@ export default {
       })
     );
     ctx.waitUntil(scheduledPhaseBEventPersistence(env));
+    // Embeddings run independently. EVENTs created in this same cron may wait
+    // until the next cycle, which keeps the pipeline bounded and loosely coupled.
+    ctx.waitUntil(scheduledEventEmbeddings(env));
   }
 };
