@@ -23,7 +23,7 @@ import {
   loadReadyStoryMatchEvents,
   loadStoryCandidates
 } from '../src/story-match-store.js';
-import { acquireStoryCentroidLease } from '../src/story-matcher.js';
+import { acquireStoryCentroidLease, isFinalStoryMatchStatus } from '../src/story-matcher.js';
 
 function event(overrides = {}) {
   return {
@@ -239,4 +239,15 @@ test('candidate and pairwise hot paths keep SQL variable count constant with JSO
   assert.match(pairwiseCall.sql, /candidate_story_ids/);
   assert.equal(pairwiseCall.bindings.length, 6);
   assert.equal(JSON.parse(pairwiseCall.bindings[1]).length, 16);
+});
+
+
+test('targeted manual status only treats persisted STORY decisions as final', () => {
+  assert.equal(isFinalStoryMatchStatus('auto_new_story'), true);
+  assert.equal(isFinalStoryMatchStatus('auto_attach'), true);
+  assert.equal(isFinalStoryMatchStatus('ambiguous_ai'), true);
+  assert.equal(isFinalStoryMatchStatus('matching_retry'), false);
+  assert.equal(isFinalStoryMatchStatus('matching'), false);
+  assert.equal(isFinalStoryMatchStatus('ready_match'), false);
+  assert.equal(isFinalStoryMatchStatus('matching_failed'), false);
 });
