@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildArticleEventProcessingHash,
   buildClubContext,
   buildEventCandidateRecord,
+  buildPhaseBClubContextHash,
   buildPhaseBInputHash,
   persistPhaseBEventCandidatesForArticle,
   resolveTrackedClubIds
@@ -70,11 +72,28 @@ test('Phase B input hash changes when full content or club extraction context ch
   assert.notEqual(first, contextChanged);
 });
 
+test('automatic ARTICLE processing hash ignores club context while the context hash tracks it', async () => {
+  const article = { ...baseArticle, excerpt: '', content: 'Version A', content_source: 'article_content_enrichments' };
+  const processingHash = await buildArticleEventProcessingHash(article);
+  const processingHashAgain = await buildArticleEventProcessingHash(article);
+  const contentChanged = await buildArticleEventProcessingHash({ ...article, content: 'Version B' });
+
+  const contextHash = await buildPhaseBClubContextHash(clubs);
+  const changedContextHash = await buildPhaseBClubContextHash([
+    ...clubs,
+    { id: 'om', name: 'Olympique de Marseille', aliases: ['OM'] }
+  ]);
+
+  assert.equal(processingHash, processingHashAgain);
+  assert.notEqual(processingHash, contentChanged);
+  assert.notEqual(contextHash, changedContextHash);
+});
+
 function bound(sql, bindings = []) {
   return { sql, bindings };
 }
 
-function makeDb({ existing = [], links = [] } = {}) {
+function makeDb({ existing = [], links = [], completedRun = null } = {}) {
   const batches = [];
   const article = {
     id: 'article-1', source_id: 'source-1', source_content_hash: 'raw-hash', language: 'fr',
@@ -106,6 +125,9 @@ function makeDb({ existing = [], links = [] } = {}) {
         bindings,
         async all() {
           if (/FROM raw_articles r/.test(sql)) return { results: [article] };
+          if (/FROM article_event_candidate_runs/.test(sql)) {
+            return { results: completedRun ? [completedRun] : [] };
+          }
           if (/FROM event_candidates\s+WHERE article_id/.test(sql)) return { results: existing };
           if (/FROM event_candidate_clubs ec/.test(sql)) return { results: links };
           return { results: [] };
@@ -138,12 +160,15 @@ test('manual persistence writes one global event and only its explicitly anchore
   assert.ok(!statements.some((row) => row.bindings?.includes('psg')));
 });
 
-test('exact replay performs zero writes', async () => {
+test('exact replay performs zero writes through the completed ARTICLE gate', async () => {
   const firstDb = makeDb();
   const first = await persistPhaseBEventCandidatesForArticle(firstDb, 'article-1', {
     extractor: () => [baseEvent]
   });
   const insert = firstDb.batches[0].find((row) => /INSERT INTO event_candidates/.test(row.sql));
+  const runInsert = firstDb.batches[0].find((row) => /INSERT INTO article_event_candidate_runs/.test(row.sql));
+  assert.ok(runInsert);
+
   const eventId = insert.bindings[0];
   const sourceHash = insert.bindings[2];
   const inputSource = insert.bindings[3];
@@ -163,16 +188,106 @@ test('exact replay performs zero writes', async () => {
       candidate_hash: candidateHash,
       language
     }],
-    links: [{ event_id: eventId, club_id: 'ol' }]
+    links: [{ event_id: eventId, club_id: 'ol' }],
+    completedRun: {
+      id: 1,
+      phase_b_input_hash: runInsert.bindings[3],
+      club_context_hash: runInsert.bindings[4],
+      input_source: runInsert.bindings[5],
+      event_count: runInsert.bindings[7],
+      completed_at: '2026-09-17T10:01:00Z'
+    }
   });
 
+  let extractorCalled = false;
   const replay = await persistPhaseBEventCandidatesForArticle(replayDb, 'article-1', {
-    extractor: () => [baseEvent]
+    extractor: () => {
+      extractorCalled = true;
+      return [baseEvent];
+    }
   });
   assert.equal(first.status, 'persisted');
+  assert.equal(replay.already_completed, true);
   assert.equal(replay.unchanged, 1);
   assert.equal(replay.writes_executed, 0);
   assert.equal(replayDb.batches.length, 0);
+  assert.equal(extractorCalled, false);
+});
+
+test('zero-EVENT outcome is durably completed and never loops on replay', async () => {
+  const firstDb = makeDb();
+  const first = await persistPhaseBEventCandidatesForArticle(firstDb, 'article-1', {
+    extractor: () => []
+  });
+
+  assert.equal(first.event_count, 0);
+  assert.equal(first.writes_executed, 1);
+  const runInsert = firstDb.batches[0].find((row) => /INSERT INTO article_event_candidate_runs/.test(row.sql));
+  assert.ok(runInsert);
+  assert.equal(runInsert.bindings[7], 0);
+
+  const replayDb = makeDb({
+    completedRun: {
+      id: 2,
+      phase_b_input_hash: runInsert.bindings[3],
+      club_context_hash: runInsert.bindings[4],
+      input_source: runInsert.bindings[5],
+      event_count: 0,
+      completed_at: '2026-09-17T10:02:00Z'
+    }
+  });
+  let extractorCalled = false;
+  const replay = await persistPhaseBEventCandidatesForArticle(replayDb, 'article-1', {
+    extractor: () => {
+      extractorCalled = true;
+      return [baseEvent];
+    }
+  });
+
+  assert.equal(replay.already_completed, true);
+  assert.equal(replay.event_count, 0);
+  assert.equal(replay.writes_executed, 0);
+  assert.equal(replayDb.batches.length, 0);
+  assert.equal(extractorCalled, false);
+});
+
+test('club or alias changes do not automatically invalidate a completed ARTICLE run', async () => {
+  const firstDb = makeDb();
+  await persistPhaseBEventCandidatesForArticle(firstDb, 'article-1', {
+    extractor: () => [baseEvent]
+  });
+  const runInsert = firstDb.batches[0].find((row) => /INSERT INTO article_event_candidate_runs/.test(row.sql));
+  assert.ok(runInsert);
+
+  const changedClubs = [
+    ...clubs,
+    { id: 'om', name: 'Olympique de Marseille', aliases: ['OM', 'Marseille'] }
+  ];
+  const replayDb = makeDb({
+    completedRun: {
+      id: 3,
+      phase_b_input_hash: runInsert.bindings[3],
+      club_context_hash: runInsert.bindings[4],
+      input_source: runInsert.bindings[5],
+      event_count: runInsert.bindings[7],
+      completed_at: '2026-09-17T10:03:00Z'
+    }
+  });
+
+  let extractorCalled = false;
+  const replay = await persistPhaseBEventCandidatesForArticle(replayDb, 'article-1', {
+    clubs: changedClubs,
+    extractor: () => {
+      extractorCalled = true;
+      return [baseEvent];
+    }
+  });
+
+  assert.equal(replay.already_completed, true);
+  assert.equal(replay.club_context_changed, true);
+  assert.notEqual(replay.club_context_hash, replay.current_club_context_hash);
+  assert.equal(replay.writes_executed, 0);
+  assert.equal(extractorCalled, false);
 });
 
 test('club context groups aliases by club id', () => {
