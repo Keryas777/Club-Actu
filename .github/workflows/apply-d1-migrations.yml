@@ -2,6 +2,9 @@ name: Apply D1 migrations
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "codex/d1-story-v1"
 
 permissions:
   contents: read
