@@ -85,6 +85,7 @@ async function findReadyEmbedding(db, eventId, representationHash) {
       AND dimension = ?
       AND encoding = ?
       AND vector IS NOT NULL
+      AND typeof(vector) = 'blob'
     LIMIT 1
   `).bind(
     eventId,
