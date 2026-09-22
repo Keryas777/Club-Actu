@@ -166,11 +166,12 @@ export async function loadShortlistContext(db, event, metrics) {
 export async function loadStoryCandidates(db, event, ctx, metrics) {
   const keys = buildStoryCandidateLookupKeys(event, ctx.discriminantTokens);
   if (!keys.length) return { candidates: [], lookup_keys: [] };
-  const values = keys.map(() => '(?, ?)').join(', ');
-  const bindings = keys.flatMap((row) => [row.key_type, row.key_value]);
   const rows = await queryAll(db, `
-    WITH event_keys(key_type, key_value) AS (
-      VALUES ${values}
+    WITH event_keys AS (
+      SELECT
+        json_extract(value, '$.key_type') AS key_type,
+        json_extract(value, '$.key_value') AS key_value
+      FROM json_each(?)
     )
     SELECT
       s.id,
@@ -199,7 +200,7 @@ export async function loadStoryCandidates(db, event, ctx, metrics) {
     GROUP BY s.id
     ORDER BY matched_key_count DESC, COALESCE(s.last_event_at, s.created_at) DESC, s.id ASC
     LIMIT ?
-  `, [...bindings, MAX_STORY_CANDIDATES], metrics);
+  `, [JSON.stringify(keys), MAX_STORY_CANDIDATES], metrics);
   return { candidates: rows, lookup_keys: keys };
 }
 
@@ -207,13 +208,18 @@ export async function loadQualifiedMembers(db, event, ctx, candidateIds, metrics
   if (!candidateIds.length) return [];
   const qKeys = buildPairwiseLookupKeys(event, ctx.discriminantTokens);
   if (!qKeys.length) return [];
-  const qValues = qKeys.map(() => '(?, ?, ?)').join(', ');
-  const qBindings = qKeys.flatMap((row) => [row.rule_type, row.key_type, row.key_value]);
-  const storyPlaceholders = inPlaceholders(candidateIds.length);
   const family = event.family || 'unknown';
   return queryAll(db, `
-    WITH q(rule_type, key_type, key_value) AS (
-      VALUES ${qValues}
+    WITH q AS (
+      SELECT
+        json_extract(value, '$.rule_type') AS rule_type,
+        json_extract(value, '$.key_type') AS key_type,
+        json_extract(value, '$.key_value') AS key_value
+      FROM json_each(?)
+    ),
+    candidate_story_ids AS (
+      SELECT CAST(value AS TEXT) AS story_id
+      FROM json_each(?)
     ),
     hits AS (
       SELECT
@@ -239,13 +245,14 @@ export async function loadQualifiedMembers(db, event, ctx, candidateIds, metrics
       JOIN story_event_index_keys AS ik INDEXED BY idx_story_event_index_keys_lookup
         ON ik.key_type = q.key_type
        AND ik.key_value = q.key_value
+      JOIN candidate_story_ids csi
+        ON csi.story_id = ik.story_id
       JOIN story_events se
         ON se.story_id = ik.story_id
        AND se.event_id = ik.event_id
        AND se.membership_status = 'active'
       JOIN event_candidates m ON m.id = ik.event_id
-      WHERE ik.story_id IN (${storyPlaceholders})
-        AND m.lifecycle_status = 'active'
+      WHERE m.lifecycle_status = 'active'
         AND m.article_id <> ?
       GROUP BY ik.story_id, ik.event_id
     ),
@@ -283,8 +290,8 @@ export async function loadQualifiedMembers(db, event, ctx, candidateIds, metrics
     WHERE rn <= ?
     ORDER BY story_id ASC, rn ASC
   `, [
-    ...qBindings,
-    ...candidateIds,
+    JSON.stringify(qKeys),
+    JSON.stringify(candidateIds),
     event.article_id,
     family,
     family,
