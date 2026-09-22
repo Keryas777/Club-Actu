@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS article_event_candidate_runs (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(article_id, processing_input_hash, extractor_version),
-  FOREIGN KEY (article_id) REFERENCES raw_articles(id) ON DELETE RESTRICT
+  FOREIGN KEY (article_id) REFERENCES raw_articles(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_article_event_candidate_runs_queue
