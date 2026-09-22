@@ -185,6 +185,7 @@ test('ready-match queue is bounded/indexed and has no OFFSET hot path', async ()
   const call = db.calls.find((row) => row.method === 'all');
   assert.ok(call);
   assert.match(call.sql, /INDEXED BY idx_event_candidates_match_queue/);
+  assert.match(call.sql, /typeof\(emb\.vector\) = 'blob'/);
   assert.match(call.sql, /LIMIT \?/);
   assert.doesNotMatch(call.sql, /OFFSET/i);
   assert.equal(call.bindings.at(-1), 2);
