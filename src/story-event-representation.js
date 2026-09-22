@@ -72,6 +72,44 @@ export function buildStructuredEventRepresentation(input = {}) {
   return parts.join(' | ');
 }
 
+export function encodeFloat32LE(vector, expectedDimension = STORY_EMBEDDING_DIMENSION) {
+  const values = vector instanceof Float32Array
+    ? vector
+    : Float32Array.from(vector || []);
+  if (values.length !== expectedDimension) {
+    throw new Error(
+      `Float32 dimension mismatch: expected ${expectedDimension}, got ${values.length}`
+    );
+  }
+  const buffer = new ArrayBuffer(values.length * 4);
+  const view = new DataView(buffer);
+  for (let i = 0; i < values.length; i++) {
+    view.setFloat32(i * 4, values[i], true);
+  }
+  return buffer;
+}
+
+export function parseLegacyFloat32Text(value, expectedDimension = STORY_EMBEDDING_DIMENSION) {
+  if (typeof value !== 'string') {
+    throw new Error(`Legacy Float32 vector must be text, got ${typeof value}`);
+  }
+  const parts = value.split(',');
+  if (parts.length !== expectedDimension) {
+    throw new Error(
+      `Legacy Float32 dimension mismatch: expected ${expectedDimension}, got ${parts.length}`
+    );
+  }
+  const values = new Float32Array(expectedDimension);
+  for (let i = 0; i < parts.length; i++) {
+    const parsed = Number(parts[i]);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`Legacy Float32 vector contains a non-finite value at index ${i}`);
+    }
+    values[i] = parsed;
+  }
+  return values;
+}
+
 export async function hashStructuredEventRepresentation(text) {
   const bytes = new TextEncoder().encode(String(text || ''));
   const digest = await crypto.subtle.digest('SHA-256', bytes);

@@ -5,6 +5,7 @@ import {
   extractEmbeddingVectors,
   loadPendingEmbeddingEvents,
   processEventEmbeddingBatch,
+  repairLegacyTextEmbeddingStorage,
   validateEmbeddingVector
 } from '../src/event-embedding-queue.js';
 
@@ -50,7 +51,7 @@ function makeDb(options = {}) {
     },
     async batch(statements) {
       this.batches.push(statements.map((s) => ({ sql: s.sql, bindings: s.bindings })));
-      return statements.map(() => ({ success: true }));
+      return statements.map(() => ({ success: true, meta: { changes: 1, rows_written: 1 } }));
     }
   };
 }
@@ -130,8 +131,32 @@ test('one EVENT is claimed, embedded once, stored as Float32 BLOB input and move
   const readyEvent = db.batches[0].find((s) => /match_status = 'ready_match'/.test(s.sql));
   assert.ok(readyEmbedding);
   assert.ok(readyEvent);
-  assert.ok(readyEmbedding.bindings[0] instanceof Float32Array);
+  assert.ok(readyEmbedding.bindings[0] instanceof ArrayBuffer);
   assert.equal(readyEmbedding.bindings[0].byteLength, 4096);
+  assert.ok(Math.abs(new DataView(readyEmbedding.bindings[0]).getFloat32(0, true) - (1 / 2048)) < 1e-8);
+});
+
+test('legacy comma-separated embedding TEXT is repaired to BLOB without an AI call and matching error is requeued', async () => {
+  const legacy = Array.from({ length: 1024 }, (_, i) => (i - 512) / 4096).join(',');
+  const db = makeDb({
+    rows: [{ id: 7, event_id: 'event-1', vector: legacy }]
+  });
+
+  const result = await repairLegacyTextEmbeddingStorage(db, { limit: 20 });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.repaired, 1);
+  assert.equal(result.requeued, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(result.writes_executed, 2);
+  assert.equal(db.batches.length, 1);
+  const repair = db.batches[0][0];
+  const requeue = db.batches[0][1];
+  assert.match(repair.sql, /typeof\(vector\) = 'text'/);
+  assert.ok(repair.bindings[0] instanceof ArrayBuffer);
+  assert.equal(repair.bindings[0].byteLength, 4096);
+  assert.match(requeue.sql, /Unsupported Float32 BLOB type: string/);
+  assert.ok(requeue.bindings.includes('event-1'));
 });
 
 test('an exact ready embedding is reused without another AI call', async () => {
@@ -154,6 +179,9 @@ test('an exact ready embedding is reused without another AI call', async () => {
   assert.equal(result.ai_calls, 0);
   assert.equal(result.writes_executed, 1);
   assert.equal(db.batches.length, 0);
+  const lookup = db.calls.find((call) => call.method === 'first' && /FROM event_embeddings/.test(call.sql));
+  assert.ok(lookup);
+  assert.match(lookup.sql, /typeof\(vector\) = 'blob'/);
 });
 
 test('fifth failed embedding attempt becomes terminal instead of tight-looping retry', async () => {

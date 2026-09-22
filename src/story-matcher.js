@@ -5,6 +5,7 @@ import {
   clampInteger, cleanError, decodeFloat32Blob, updateCentroid, buildStoryId,
   buildEventIndexKeys, buildCandidateSetHash
 } from './story-matching-core.js';
+import { encodeFloat32LE } from './story-event-representation.js';
 import {
   queryAll, runStatement, runBatch, loadReadyStoryMatchEvents, claimStoryMatchEvent,
   loadShortlistContext, loadStoryCandidates, loadQualifiedMembers, scoreCandidates,
@@ -43,7 +44,7 @@ async function persistNewStory(db, event, vector, decision, scored, candidateSet
       event.family || 'unknown',
       event.published_at || null,
       event.published_at || null,
-      vector,
+      encodeFloat32LE(vector),
       STORY_EMBEDDING_MODEL,
       STORY_EMBEDDING_VERSION,
       STORY_EMBEDDING_DIMENSION,
@@ -240,7 +241,7 @@ async function persistAttach(db, event, vector, decision, scored, candidateSetHa
         event.published_at || null,
         event.published_at || null,
         event.published_at || null,
-        nextCentroid,
+        encodeFloat32LE(nextCentroid),
         target.id,
         lease.leaseToken
       ),
