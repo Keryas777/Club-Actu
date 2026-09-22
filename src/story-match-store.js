@@ -93,6 +93,7 @@ export async function loadReadyStoryMatchEvents(db, options = {}, metrics = { qu
      AND emb.dimension = ?
      AND emb.encoding = ?
      AND emb.vector IS NOT NULL
+     AND typeof(emb.vector) = 'blob'
     WHERE e.lifecycle_status = 'active'
       AND ${eligibility}
       ${whereEvent}
