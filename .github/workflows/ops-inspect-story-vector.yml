@@ -29,11 +29,30 @@ jobs:
           set -euo pipefail
           npx wrangler d1 execute DB --remote --json --command "
             SELECT
+              'event_embeddings' AS object,
               typeof(vector) AS storage_type,
               length(vector) AS storage_length,
               COUNT(*) AS row_count
             FROM event_embeddings
             WHERE status = 'ready' AND vector IS NOT NULL
             GROUP BY typeof(vector), length(vector)
-            ORDER BY storage_type, storage_length;
+            UNION ALL
+            SELECT
+              'story_centroids' AS object,
+              typeof(centroid_blob) AS storage_type,
+              length(centroid_blob) AS storage_length,
+              COUNT(*) AS row_count
+            FROM stories
+            WHERE status = 'active' AND centroid_blob IS NOT NULL
+            GROUP BY typeof(centroid_blob), length(centroid_blob);
+          "
+          npx wrangler d1 execute DB --remote --json --command "
+            SELECT
+              (SELECT COUNT(*) FROM stories WHERE status='active') AS active_stories,
+              (SELECT COUNT(*) FROM story_events WHERE membership_status='active') AS active_memberships,
+              (SELECT COUNT(*) FROM story_match_attempts) AS match_attempts,
+              (SELECT COUNT(*) FROM story_index_keys) AS story_index_keys,
+              (SELECT COUNT(*) FROM story_event_index_keys) AS story_event_index_keys,
+              (SELECT COUNT(*) FROM story_shortlist_token_df) AS token_df_rows,
+              (SELECT event_count FROM story_shortlist_contexts WHERE language='fr') AS fr_context_event_count;
           "
