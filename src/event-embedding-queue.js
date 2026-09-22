@@ -80,13 +80,17 @@ async function findReadyEmbedding(db, eventId, representationHash) {
       AND embedding_version = ?
       AND representation_hash = ?
       AND status = 'ready'
+      AND dimension = ?
+      AND encoding = ?
       AND vector IS NOT NULL
     LIMIT 1
   `).bind(
     eventId,
     STORY_EMBEDDING_MODEL,
     STORY_EMBEDDING_VERSION,
-    representationHash
+    representationHash,
+    STORY_EMBEDDING_DIMENSION,
+    STORY_EMBEDDING_ENCODING
   ).first();
 }
 
