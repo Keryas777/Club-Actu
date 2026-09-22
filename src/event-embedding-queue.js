@@ -3,10 +3,12 @@ import {
   STORY_EMBEDDING_ENCODING,
   STORY_EMBEDDING_MODEL,
   STORY_EMBEDDING_VERSION,
-  buildStructuredEventEmbeddingInput
+  buildStructuredEventEmbeddingInput,
+  encodeFloat32LE,
+  parseLegacyFloat32Text
 } from './story-event-representation.js';
 
-export const EVENT_EMBEDDING_BATCH_VERSION = 'event-embedding-batch-v1';
+export const EVENT_EMBEDDING_BATCH_VERSION = 'event-embedding-batch-v2';
 export const DEFAULT_EVENT_EMBEDDING_LIMIT = 4;
 export const DEFAULT_EVENT_EMBEDDING_MAX_DURATION_MS = 12000;
 const RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -251,6 +253,7 @@ export async function runBgeM3Embeddings(ai, texts) {
 }
 
 function readyStatements(db, job, vector) {
+  const blob = encodeFloat32LE(vector);
   return [
     db.prepare(`
       UPDATE event_embeddings
@@ -269,7 +272,7 @@ function readyStatements(db, job, vector) {
         AND status = 'processing'
         AND lease_token = ?
     `).bind(
-      vector,
+      blob,
       job.event_id,
       STORY_EMBEDDING_MODEL,
       STORY_EMBEDDING_VERSION,
@@ -351,6 +354,116 @@ async function markEmbeddingFailure(db, job, error) {
   ]);
 
   return { terminal, status: eventStatus };
+}
+
+export async function repairLegacyTextEmbeddingStorage(db, options = {}) {
+  if (!db) throw new Error('D1 binding is required');
+  const limit = clampInteger(options.limit, 20, 1, 50);
+  const result = await db.prepare(`
+    SELECT id, event_id, vector
+    FROM event_embeddings
+    WHERE status = 'ready'
+      AND embedding_model = ?
+      AND embedding_version = ?
+      AND dimension = ?
+      AND encoding = ?
+      AND vector IS NOT NULL
+      AND typeof(vector) = 'text'
+    ORDER BY id ASC
+    LIMIT ?
+  `).bind(
+    STORY_EMBEDDING_MODEL,
+    STORY_EMBEDDING_VERSION,
+    STORY_EMBEDDING_DIMENSION,
+    STORY_EMBEDDING_ENCODING,
+    limit
+  ).all();
+
+  const rows = result?.results || [];
+  const valid = [];
+  const errors = [];
+  for (const row of rows) {
+    try {
+      const vector = parseLegacyFloat32Text(row.vector);
+      valid.push({ ...row, blob: encodeFloat32LE(vector) });
+    } catch (error) {
+      errors.push({
+        embedding_id: row.id,
+        event_id: row.event_id,
+        error: cleanError(error)
+      });
+    }
+  }
+
+  if (!valid.length) {
+    return {
+      scanned: rows.length,
+      repaired: 0,
+      requeued: 0,
+      failed: errors.length,
+      writes_executed: 0,
+      rows_read: Number(result?.meta?.rows_read || 0),
+      examples: errors.slice(0, 6)
+    };
+  }
+
+  const statements = [];
+  for (const row of valid) {
+    statements.push(
+      db.prepare(`
+        UPDATE event_embeddings
+        SET vector = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND status = 'ready'
+          AND typeof(vector) = 'text'
+      `).bind(row.blob, row.id),
+      db.prepare(`
+        UPDATE event_candidates
+        SET match_status = 'ready_match',
+            next_retry_at = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            last_error_code = NULL,
+            last_error_detail = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND lifecycle_status = 'active'
+          AND match_status = 'matching_retry'
+          AND last_error_code = 'story_match_error'
+          AND last_error_detail = 'Unsupported Float32 BLOB type: string'
+      `).bind(row.event_id)
+    );
+  }
+
+  const batch = await db.batch(statements);
+  let repaired = 0;
+  let requeued = 0;
+  let rowsWritten = 0;
+  for (let i = 0; i < batch.length; i++) {
+    const changes = Number(batch[i]?.meta?.changes || 0);
+    rowsWritten += Number(batch[i]?.meta?.rows_written ?? changes);
+    if (i % 2 === 0) repaired += changes;
+    else requeued += changes;
+  }
+
+  return {
+    scanned: rows.length,
+    repaired,
+    requeued,
+    failed: errors.length,
+    writes_executed: statements.length,
+    rows_read: Number(result?.meta?.rows_read || 0),
+    rows_written: rowsWritten,
+    examples: [
+      ...valid.slice(0, 6).map((row) => ({
+        embedding_id: row.id,
+        event_id: row.event_id,
+        status: 'repaired'
+      })),
+      ...errors.slice(0, 6)
+    ].slice(0, 6)
+  };
 }
 
 export async function processEventEmbeddingBatch(db, ai, options = {}) {
