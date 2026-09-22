@@ -198,6 +198,35 @@ async function scheduledEventEmbeddings(env) {
 }
 
 
+async function eventEmbeddingStorageRepairEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const limit = parseLimit(url, 20, 50);
+
+  try {
+    const { repairLegacyTextEmbeddingStorage } = await import("./event-embedding-queue.js");
+    const result = await repairLegacyTextEmbeddingStorage(env.DB, { limit });
+    return json({ ok: true, trigger: "repair_event_embedding_storage", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("event-embedding-storage-repair failed", { name, message, limit });
+    return json({
+      ok: false,
+      error: "event_embedding_storage_repair_failed",
+      diagnostic: { name, message, limit }
+    }, { status: 500 });
+  }
+}
+
 async function storyMatchBatchEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -302,6 +331,10 @@ export default {
 
     if (url.pathname === "/api/process-event-embedding-batch" && request.method === "POST") {
       return eventEmbeddingBatchEndpoint(request, env, url);
+    }
+
+    if (url.pathname === "/api/repair-event-embedding-storage" && request.method === "POST") {
+      return eventEmbeddingStorageRepairEndpoint(request, env, url);
     }
 
     if (url.pathname === "/api/process-story-match-batch" && request.method === "POST") {
