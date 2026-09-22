@@ -29,30 +29,42 @@ jobs:
           set -euo pipefail
           npx wrangler d1 execute DB --remote --json --command "
             SELECT
-              'event_embeddings' AS object,
-              typeof(vector) AS storage_type,
-              length(vector) AS storage_length,
-              COUNT(*) AS row_count
-            FROM event_embeddings
-            WHERE status = 'ready' AND vector IS NOT NULL
-            GROUP BY typeof(vector), length(vector)
-            UNION ALL
-            SELECT
-              'story_centroids' AS object,
-              typeof(centroid_blob) AS storage_type,
-              length(centroid_blob) AS storage_length,
-              COUNT(*) AS row_count
-            FROM stories
-            WHERE status = 'active' AND centroid_blob IS NOT NULL
-            GROUP BY typeof(centroid_blob), length(centroid_blob);
+              e.id AS event_id,
+              e.article_id,
+              e.family,
+              e.stage,
+              e.published_at,
+              substr(e.primary_people_json,1,220) AS people,
+              substr(e.primary_clubs_json,1,220) AS clubs,
+              e.relation_from,
+              e.relation_to,
+              e.competition,
+              substr(e.opponents_json,1,180) AS opponents,
+              substr(e.lexical_tokens_json,1,420) AS lexical,
+              r.title AS article_title
+            FROM event_candidates e
+            JOIN raw_articles r ON r.id=e.article_id
+            JOIN event_embeddings emb ON emb.event_id=e.id
+             AND emb.status='ready'
+             AND typeof(emb.vector)='blob'
+            WHERE e.lifecycle_status='active'
+              AND e.match_status='ready_match'
+            ORDER BY e.created_at ASC, e.id ASC
+            LIMIT 20;
           "
           npx wrangler d1 execute DB --remote --json --command "
             SELECT
-              (SELECT COUNT(*) FROM stories WHERE status='active') AS active_stories,
-              (SELECT COUNT(*) FROM story_events WHERE membership_status='active') AS active_memberships,
-              (SELECT COUNT(*) FROM story_match_attempts) AS match_attempts,
-              (SELECT COUNT(*) FROM story_index_keys) AS story_index_keys,
-              (SELECT COUNT(*) FROM story_event_index_keys) AS story_event_index_keys,
-              (SELECT COUNT(*) FROM story_shortlist_token_df) AS token_df_rows,
-              (SELECT event_count FROM story_shortlist_contexts WHERE language='fr') AS fr_context_event_count;
+              s.id AS story_id,
+              s.family AS story_family,
+              s.member_count,
+              s.centroid_revision,
+              s.founder_event_id,
+              e.article_id,
+              e.family AS founder_family,
+              r.title AS founder_title
+            FROM stories s
+            JOIN event_candidates e ON e.id=s.founder_event_id
+            JOIN raw_articles r ON r.id=e.article_id
+            WHERE s.status='active'
+            ORDER BY s.created_at ASC;
           "
