@@ -88,6 +88,63 @@ async function phaseBEventPreviewEndpoint(env, club, limit, offset, articleId) {
   }
 }
 
+async function phaseBEventBatchEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const limit = parseLimit(url, 4, 12);
+  const rawLookback = Number(url.searchParams.get("lookback_hours") || 72);
+  const lookbackHours = Number.isFinite(rawLookback)
+    ? Math.max(1, Math.min(24 * 14, Math.trunc(rawLookback)))
+    : 72;
+
+  try {
+    const { processPhaseBEventPersistenceBatch } = await import("./phase-b-event-queue.js");
+    const result = await processPhaseBEventPersistenceBatch(env.DB, {
+      limit,
+      lookbackHours,
+      maxDurationMs: 12000
+    });
+    return json({ ok: true, trigger: "process_phase_b_event_batch", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("phase-b-event-batch failed", { name, message, limit, lookbackHours });
+    return json({
+      ok: false,
+      error: "phase_b_event_batch_failed",
+      diagnostic: { name, message, limit, lookback_hours: lookbackHours }
+    }, { status: 500 });
+  }
+}
+
+async function scheduledPhaseBEventPersistence(env) {
+  if (!env.DB) return null;
+  try {
+    const { processPhaseBEventPersistenceBatch } = await import("./phase-b-event-queue.js");
+    const result = await processPhaseBEventPersistenceBatch(env.DB, {
+      limit: Number(env.PHASE_B_EVENT_BATCH_LIMIT || 4),
+      lookbackHours: Number(env.PHASE_B_EVENT_LOOKBACK_HOURS || 72),
+      maxDurationMs: Number(env.PHASE_B_EVENT_MAX_DURATION_MS || 12000)
+    });
+    console.log("phase-b-event-persistence-batch", result);
+    return result;
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    // Phase B must never break collection / Phase A scheduled processing.
+    console.error("phase-b-event-persistence-batch failed", { name, message });
+    return { ok: false, name, message };
+  }
+}
+
 async function phaseBEventPersistenceEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -152,13 +209,17 @@ export default {
       return phaseBEventPersistenceEndpoint(request, env, url);
     }
 
+    if (url.pathname === "/api/process-phase-b-event-batch" && request.method === "POST") {
+      return phaseBEventBatchEndpoint(request, env, url);
+    }
+
     return baseWorker.fetch(request, env, ctx);
   },
 
   async scheduled(event, env, ctx) {
     // Preserve the existing collection + deterministic Phase A + original role
-    // classifier schedule. Phase B event extraction stays preview-only and is
-    // deliberately NOT connected to scheduled production processing.
+    // classifier schedule, then run a small independent EVENT persistence batch.
+    // STORY matching / embeddings / AI are still deliberately not scheduled.
     baseWorker.scheduled(event, env, ctx);
     ctx.waitUntil(
       repairPhaseAResiduals(env.DB, env, {
@@ -169,5 +230,6 @@ export default {
         staleLimit: 100
       })
     );
+    ctx.waitUntil(scheduledPhaseBEventPersistence(env));
   }
 };
