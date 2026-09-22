@@ -179,6 +179,9 @@ test('an exact ready embedding is reused without another AI call', async () => {
   assert.equal(result.ai_calls, 0);
   assert.equal(result.writes_executed, 1);
   assert.equal(db.batches.length, 0);
+  const lookup = db.calls.find((call) => call.method === 'first' && /FROM event_embeddings/.test(call.sql));
+  assert.ok(lookup);
+  assert.match(lookup.sql, /typeof\(vector\) = 'blob'/);
 });
 
 test('fifth failed embedding attempt becomes terminal instead of tight-looping retry', async () => {
