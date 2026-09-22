@@ -29,17 +29,11 @@ jobs:
           set -euo pipefail
           npx wrangler d1 execute DB --remote --json --command "
             SELECT
-              id,
-              event_id,
               typeof(vector) AS storage_type,
               length(vector) AS storage_length,
-              substr(vector, 1, 100) AS text_prefix,
-              length(vector) - length(replace(vector, ',', '')) AS comma_count,
-              dimension,
-              encoding,
-              status
+              COUNT(*) AS row_count
             FROM event_embeddings
             WHERE status = 'ready' AND vector IS NOT NULL
-            ORDER BY id DESC
-            LIMIT 4;
+            GROUP BY typeof(vector), length(vector)
+            ORDER BY storage_type, storage_length;
           "
