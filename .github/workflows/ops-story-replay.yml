@@ -1,0 +1,44 @@
+name: Ops verify STORY replay idempotence
+
+on:
+  push:
+    branches:
+      - "codex/d1-story-v1-blob-fix"
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Replay finalized EVENT
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          EVENT_ID: 3406de8499c310db78ca5e096e6b8104f73541eafec1e4183d600910ad4641ae
+        run: |
+          set -euo pipefail
+          status="$(
+            curl --silent --show-error \
+              --output replay.json \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+              --header "Accept: application/json" \
+              "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$EVENT_ID"
+          )"
+          cat replay.json
+          echo
+          test "$status" -ge 200
+          test "$status" -lt 300
+          python3 - <<'PY'
+          import json
+          d=json.load(open('replay.json'))
+          assert d.get('ok') is True, d
+          assert d.get('reused') == 1, d
+          assert d.get('d1_write_statements') == 0, d
+          assert d.get('d1_rows_written') == 0, d
+          assert d.get('stop_reason') == 'already_final', d
+          print('Replay idempotence OK')
+          PY
