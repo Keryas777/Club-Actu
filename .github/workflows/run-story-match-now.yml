@@ -11,9 +11,6 @@ on:
         description: "Optional exact EVENT id for targeted smoke/replay"
         required: false
         default: ""
-  push:
-    branches:
-      - "codex/d1-story-v1-blob-fix"
 
 permissions:
   contents: read
