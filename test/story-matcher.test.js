@@ -17,7 +17,12 @@ import {
   temporalGaussianScore,
   updateCentroid
 } from '../src/story-matching-core.js';
-import { chooseStoryDecision, loadReadyStoryMatchEvents } from '../src/story-match-store.js';
+import {
+  chooseStoryDecision,
+  loadQualifiedMembers,
+  loadReadyStoryMatchEvents,
+  loadStoryCandidates
+} from '../src/story-match-store.js';
 import { acquireStoryCentroidLease } from '../src/story-matcher.js';
 
 function event(overrides = {}) {
@@ -200,4 +205,38 @@ test('centroid concurrency uses a scoped STORY lease instead of a global lock/CA
   assert.match(call.sql, /WHERE id = \?/);
   assert.match(call.sql, /centroid_lease_expires_at/);
   assert.doesNotMatch(call.sql, /centroid_revision\s*=\s*\?/);
+});
+
+
+test('candidate and pairwise hot paths keep SQL variable count constant with JSON bindings', async () => {
+  const richEvent = event({
+    primary_people_json: JSON.stringify(['Paulo Fonseca', 'Ernest Nuamah']),
+    primary_clubs_json: JSON.stringify(['Olympique Lyonnais', 'Stade Rennais']),
+    relation_from: null,
+    relation_to: null,
+    lexical_tokens_json: JSON.stringify(
+      Array.from({ length: 24 }, (_, i) => `salient-${String(i).padStart(2, '0')}`)
+    )
+  });
+  const ctx = {
+    discriminantTokens: new Set(JSON.parse(richEvent.lexical_tokens_json)),
+    maxDf: 3,
+    df: new Map()
+  };
+  const db = makeDb({ rows: [] });
+  const metrics = { queries: 0, rows_read: 0 };
+
+  await loadStoryCandidates(db, richEvent, ctx, metrics);
+  const candidateCall = db.calls.at(-1);
+  assert.match(candidateCall.sql, /json_each\(\?\)/);
+  assert.equal(candidateCall.bindings.length, 2);
+  assert.equal(JSON.parse(candidateCall.bindings[0]).length > 24, true);
+
+  const candidateIds = Array.from({ length: 16 }, (_, i) => `story-${i}`);
+  await loadQualifiedMembers(db, richEvent, ctx, candidateIds, metrics);
+  const pairwiseCall = db.calls.at(-1);
+  assert.match(pairwiseCall.sql, /FROM json_each\(\?\)/);
+  assert.match(pairwiseCall.sql, /candidate_story_ids/);
+  assert.equal(pairwiseCall.bindings.length, 6);
+  assert.equal(JSON.parse(pairwiseCall.bindings[1]).length, 16);
 });
