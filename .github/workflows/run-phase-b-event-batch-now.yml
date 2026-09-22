@@ -1,0 +1,75 @@
+name: Run Phase B EVENT batch now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-b-event-batch-manual
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Process bounded EVENT batch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check manual trigger secret
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MANUAL_TRIGGER_TOKEN" ]; then
+            echo "MANUAL_TRIGGER_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+      - name: Run one bounded EVENT persistence batch
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+
+          status="$(
+            curl --silent --show-error \
+              --output phase-b-event-batch.json \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+              --header "Accept: application/json" \
+              "$BASE_URL/api/process-phase-b-event-batch?limit=4&lookback_hours=72"
+          )"
+
+          echo "HTTP $status"
+          cat phase-b-event-batch.json
+          echo
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            exit 1
+          fi
+
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+
+          data = json.load(open("phase-b-event-batch.json", encoding="utf-8"))
+          if data.get("ok") is not True:
+              raise SystemExit("Worker returned ok != true")
+
+          print("# Club Actu — Phase B EVENT batch")
+          print()
+          print(f'- Candidates: **{int(data.get("candidates") or 0)}**')
+          print(f'- Processed: **{int(data.get("processed") or 0)}**')
+          print(f'- Persisted: **{int(data.get("persisted") or 0)}**')
+          print(f'- Deferred: **{int(data.get("deferred") or 0)}**')
+          print(f'- Errors: **{int(data.get("errors") or 0)}**')
+          print(f'- EVENT candidates produced: **{int(data.get("event_candidates") or 0)}**')
+          print(f'- D1 writes/statements: **{int(data.get("writes_executed") or 0)}**')
+          print(f'- Stop reason: **{data.get("stop_reason") or "unknown"}**')
+          print()
+          print("```json")
+          print(json.dumps(data.get("examples") or [], ensure_ascii=False, indent=2))
+          print("```")
+          PY
