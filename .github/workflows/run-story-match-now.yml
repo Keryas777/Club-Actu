@@ -2,6 +2,9 @@ name: Run STORY matching now
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "codex/d1-story-v1"
     inputs:
       limit:
         description: "Maximum ready_match EVENTs (1-8)"
