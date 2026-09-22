@@ -1,0 +1,98 @@
+name: Run STORY matching now
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Maximum ready_match EVENTs (1-8)"
+        required: false
+        default: "2"
+      event_id:
+        description: "Optional exact EVENT id for targeted smoke/replay"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: story-matching-manual
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Match bounded STORY batch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check manual trigger secret
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$MANUAL_TRIGGER_TOKEN" || { echo "MANUAL_TRIGGER_TOKEN repository secret is missing."; exit 1; }
+
+      - name: Run one bounded STORY matching batch
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          LIMIT: ${{ inputs.limit }}
+          EVENT_ID: ${{ inputs.event_id }}
+        run: |
+          set -euo pipefail
+          query="limit=${LIMIT:-2}"
+          if [ -n "${EVENT_ID:-}" ]; then
+            encoded="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["EVENT_ID"], safe=""))')"
+            query="$query&event_id=$encoded"
+          fi
+
+          status="$(
+            curl --silent --show-error \
+              --output story-match.json \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+              --header "Accept: application/json" \
+              "$BASE_URL/api/process-story-match-batch?$query"
+          )"
+
+          echo "HTTP $status"
+          cat story-match.json
+          echo
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then exit 1; fi
+
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d=json.load(open('story-match.json',encoding='utf-8'))
+          if d.get('ok') is not True: raise SystemExit('Worker returned ok != true')
+          print('# Club Actu — STORY V1 manual smoke')
+          print()
+          print(f'- Matcher: **{d.get("matcher_version","unknown")}**')
+          th=d.get('thresholds') or {}; w=d.get('score_weights') or {}
+          print(f'- Thresholds: LOW **{th.get("low")}**, HIGH **{th.get("high")}**')
+          print(f'- Weights: embedding **{w.get("embedding")}**, lexical **{w.get("lexical")}**, temporal **{w.get("temporal")}**')
+          print(f'- Temporal sigma: **{d.get("temporal_sigma_days")} days**')
+          print(f'- Embedding: **{d.get("embedding_model")} / {d.get("embedding_version")} / {d.get("embedding_dimension")}D**')
+          for k in ['candidates','claimed','decided','auto_new_story','auto_attach','ambiguous_ai','reused','deferred','retry','failed']:
+              print(f'- {k}: **{int(d.get(k) or 0)}**')
+          print(f'- D1 queries: **{int(d.get("d1_queries") or 0)}**')
+          print(f'- D1 rows read: **{int(d.get("d1_rows_read") or 0)}**')
+          print(f'- D1 write statements: **{int(d.get("d1_write_statements") or 0)}**')
+          print(f'- D1 rows written: **{int(d.get("d1_rows_written") or 0)}**')
+          print(f'- Stop reason: **{d.get("stop_reason","unknown")}**')
+          for i,e in enumerate(d.get('examples') or [],1):
+              print(f'\n## EVENT {i}: `{e.get("event_id","?")}`')
+              print(f'- Status/decision: **{e.get("status")} / {e.get("decision","-")}** ({e.get("decision_reason",e.get("reason","-"))})')
+              print(f'- Embedding id: `{e.get("embedding_id","-")}`; representation: `{e.get("representation_hash","-")}`')
+              print(f'- Shortlist context: `{e.get("shortlist_context_version","-")}`; maxDf: **{e.get("max_df","-")}**')
+              print(f'- Candidate set hash: `{e.get("candidate_set_hash","-")}`')
+              print(f'- Selected STORY: `{e.get("selected_story_id",e.get("story_id","-"))}`')
+              print(f'- Members: **{e.get("member_count_before","-")} → {e.get("member_count_after","-")}**')
+              print(f'- Centroid revision: **{e.get("centroid_revision_before","-")} → {e.get("centroid_revision_after","-")}**')
+              print(f'- Clubs added: `{e.get("clubs_added",[])}`; index keys added: **{e.get("index_keys_added",0)}**')
+              for c in e.get('candidates') or []:
+                  print(f'  - candidate `{c.get("story_id")}`: shortlist={c.get("shortlist_pass")}, family={c.get("family_compatible")}, embedding={c.get("embedding")}, lexical={c.get("lexical")}, temporal={c.get("temporal")}, hybrid={c.get("hybrid")}, reasons={c.get("shortlist_members")}')
+          print('\n<details><summary>Raw JSON</summary>\n\n```json')
+          print(json.dumps(d,ensure_ascii=False,indent=2))
+          print('```\n</details>')
+          PY

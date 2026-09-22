@@ -197,6 +197,41 @@ async function scheduledEventEmbeddings(env) {
   }
 }
 
+
+async function storyMatchBatchEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const limit = parseLimit(url, 2, 8);
+  const eventId = (url.searchParams.get("event_id") || "").trim() || null;
+
+  try {
+    const { processStoryMatchBatch } = await import("./story-matcher.js");
+    const result = await processStoryMatchBatch(env.DB, {
+      limit,
+      eventId,
+      maxDurationMs: 12000
+    });
+    return json({ ok: true, trigger: "process_story_match_batch", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("story-match-batch failed", { name, message, limit, eventId });
+    return json({
+      ok: false,
+      error: "story_match_batch_failed",
+      diagnostic: { name, message, limit, event_id: eventId }
+    }, { status: 500 });
+  }
+}
+
 async function phaseBEventPersistenceEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -269,13 +304,17 @@ export default {
       return eventEmbeddingBatchEndpoint(request, env, url);
     }
 
+    if (url.pathname === "/api/process-story-match-batch" && request.method === "POST") {
+      return storyMatchBatchEndpoint(request, env, url);
+    }
+
     return baseWorker.fetch(request, env, ctx);
   },
 
   async scheduled(event, env, ctx) {
-    // Preserve the existing collection + deterministic Phase A + original role
-    // classifier schedule, then run a small independent EVENT persistence batch.
-    // STORY matching / embeddings / AI are still deliberately not scheduled.
+    // Preserve collection + Phase A, then run the already-validated bounded EVENT
+    // persistence and embedding queues independently. STORY matching remains manual
+    // until its real D1 smoke test is validated.
     baseWorker.scheduled(event, env, ctx);
     ctx.waitUntil(
       repairPhaseAResiduals(env.DB, env, {

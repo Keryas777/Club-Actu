@@ -29,6 +29,9 @@ jobs:
           node --check src/phase-b-event-queue.js
           node --check src/story-event-representation.js
           node --check src/event-embedding-queue.js
+          node --check src/story-matching-core.js
+          node --check src/story-match-store.js
+          node --check src/story-matcher.js
 
       - name: Run unit tests
         run: npm test
@@ -56,6 +59,16 @@ jobs:
               "article_club_assessments",
               "processing_runs",
               "article_club_role_classifications",
+              "event_candidates",
+              "event_embeddings",
+              "stories",
+              "story_events",
+              "story_clubs",
+              "story_index_keys",
+              "story_match_attempts",
+              "story_shortlist_contexts",
+              "story_shortlist_token_df",
+              "story_event_index_keys",
           }
           actual = {
               row[0]
