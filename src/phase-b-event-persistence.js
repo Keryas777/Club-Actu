@@ -4,7 +4,7 @@ import {
   extractEventCandidates
 } from './phase-b-events-targeted.js';
 
-export const EVENT_PERSISTENCE_VERSION = 'phase-b-event-persistence-v2';
+export const EVENT_PERSISTENCE_VERSION = 'phase-b-event-persistence-v3';
 const PHASE_A_EXTRACTOR_VERSION = 'phase-a-extractor-v1';
 const PHASE_A_RULE_VERSION = 'phase-a-relevance-v3';
 
@@ -238,7 +238,12 @@ async function loadArticleForPersistence(db, articleId) {
         WHEN r.raw_content IS NOT NULL AND LENGTH(TRIM(r.raw_content)) > 0
           THEN 'raw_articles'
         ELSE 'none'
-      END AS content_source
+      END AS content_source,
+      CASE
+        WHEN ce.content_text IS NOT NULL AND LENGTH(TRIM(ce.content_text)) > 0
+          THEN COALESCE(NULLIF(ce.content_hash, ''), r.content_hash)
+        ELSE r.content_hash
+      END AS input_content_hash
     FROM raw_articles r
     JOIN sources s
       ON s.id = r.source_id
@@ -273,6 +278,7 @@ async function loadCompletedArticleEventRun(db, articleId, processingInputHash) 
       phase_b_input_hash,
       club_context_hash,
       input_source,
+      input_content_hash,
       event_count,
       completed_at
     FROM article_event_candidate_runs
@@ -312,14 +318,34 @@ async function loadExistingClubLinks(db, articleId) {
   return links;
 }
 
-function insertArticleEventRunStatement(db, {
+async function refreshCompletedRunContentHash(db, completedRun, article) {
+  const currentHash = article.input_content_hash || article.source_content_hash || '';
+  if (!currentHash || completedRun.input_content_hash === currentHash) return 0;
+
+  const result = await db.prepare(`
+    UPDATE article_event_candidate_runs
+    SET input_content_hash = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+      AND status = 'completed'
+      AND (input_content_hash IS NULL OR input_content_hash <> ?)
+  `).bind(currentHash, completedRun.id, currentHash).run();
+
+  return Number(result?.meta?.changes || 0);
+}
+
+async function claimArticleEventRun(db, {
   article,
   processingInputHash,
   phaseBInputHash,
   clubContextHash,
-  eventCount
+  leaseMs = 120000
 }) {
-  return db.prepare(`
+  const leaseToken = crypto.randomUUID();
+  const leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString();
+  const inputContentHash = article.input_content_hash || article.source_content_hash || '';
+
+  const result = await db.prepare(`
     INSERT INTO article_event_candidate_runs (
       article_id,
       source_content_hash,
@@ -327,17 +353,58 @@ function insertArticleEventRunStatement(db, {
       phase_b_input_hash,
       club_context_hash,
       input_source,
+      input_content_hash,
       extractor_version,
       status,
       event_count,
       attempts,
+      next_retry_at,
+      lease_token,
+      lease_expires_at,
+      error_code,
+      error_detail,
       started_at,
       completed_at,
       updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      'completed', ?, 1,
-      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      ?, ?, ?, ?, ?, ?, ?, ?,
+      'processing', NULL, 1, NULL, ?, ?, NULL, NULL,
+      CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP
+    )
+    ON CONFLICT(article_id, processing_input_hash, extractor_version)
+    DO UPDATE SET
+      source_content_hash = excluded.source_content_hash,
+      phase_b_input_hash = excluded.phase_b_input_hash,
+      club_context_hash = excluded.club_context_hash,
+      input_source = excluded.input_source,
+      input_content_hash = excluded.input_content_hash,
+      status = 'processing',
+      event_count = NULL,
+      attempts = article_event_candidate_runs.attempts + 1,
+      next_retry_at = NULL,
+      lease_token = excluded.lease_token,
+      lease_expires_at = excluded.lease_expires_at,
+      error_code = NULL,
+      error_detail = NULL,
+      started_at = CURRENT_TIMESTAMP,
+      completed_at = NULL,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE (
+      article_event_candidate_runs.status = 'pending'
+      OR (
+        article_event_candidate_runs.status = 'retry'
+        AND (
+          article_event_candidate_runs.next_retry_at IS NULL
+          OR article_event_candidate_runs.next_retry_at <= CURRENT_TIMESTAMP
+        )
+      )
+      OR (
+        article_event_candidate_runs.status = 'processing'
+        AND (
+          article_event_candidate_runs.lease_expires_at IS NULL
+          OR article_event_candidate_runs.lease_expires_at <= CURRENT_TIMESTAMP
+        )
+      )
     )
   `).bind(
     article.id,
@@ -346,9 +413,81 @@ function insertArticleEventRunStatement(db, {
     phaseBInputHash,
     clubContextHash,
     article.content_source || 'none',
+    inputContentHash,
     EVENT_EXTRACTOR_VERSION,
-    eventCount
+    leaseToken,
+    leaseExpiresAt
+  ).run();
+
+  return {
+    claimed: Number(result?.meta?.changes || 0) > 0,
+    leaseToken,
+    leaseExpiresAt
+  };
+}
+
+function completeArticleEventRunStatement(db, {
+  articleId,
+  processingInputHash,
+  leaseToken,
+  eventCount
+}) {
+  return db.prepare(`
+    UPDATE article_event_candidate_runs
+    SET status = 'completed',
+        event_count = ?,
+        next_retry_at = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        error_code = NULL,
+        error_detail = NULL,
+        completed_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE article_id = ?
+      AND processing_input_hash = ?
+      AND extractor_version = ?
+      AND status = 'processing'
+      AND lease_token = ?
+  `).bind(
+    eventCount,
+    articleId,
+    processingInputHash,
+    EVENT_EXTRACTOR_VERSION,
+    leaseToken
   );
+}
+
+async function markArticleEventRunRetry(db, {
+  articleId,
+  processingInputHash,
+  leaseToken,
+  error
+}) {
+  const detail = cleanText(error instanceof Error ? error.message : String(error)).slice(0, 1200);
+  const nextRetryAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+  await db.prepare(`
+    UPDATE article_event_candidate_runs
+    SET status = 'retry',
+        next_retry_at = ?,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        error_code = 'event_persistence_error',
+        error_detail = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE article_id = ?
+      AND processing_input_hash = ?
+      AND extractor_version = ?
+      AND status = 'processing'
+      AND lease_token = ?
+  `).bind(
+    nextRetryAt,
+    detail,
+    articleId,
+    processingInputHash,
+    EVENT_EXTRACTOR_VERSION,
+    leaseToken
+  ).run();
 }
 
 function insertEventStatement(db, record) {
@@ -476,6 +615,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     : await loadCompletedArticleEventRun(db, article.id, processingInputHash);
 
   if (completedRun) {
+    const markerWrites = await refreshCompletedRunContentHash(db, completedRun, article);
     const storedEventCount = Number(completedRun.event_count || 0);
     return {
       article_id: article.id,
@@ -483,6 +623,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
       persistence_version: EVENT_PERSISTENCE_VERSION,
       extractor_version: EVENT_EXTRACTOR_VERSION,
       content_source: completedRun.input_source || article.content_source || 'none',
+      input_content_hash: article.input_content_hash || article.source_content_hash || '',
       processing_input_hash: processingInputHash,
       phase_b_input_hash: completedRun.phase_b_input_hash,
       club_context_hash: completedRun.club_context_hash,
@@ -494,7 +635,7 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
       ambiguous_club_anchor_count: 0,
       unmatched_club_anchor_count: 0,
       events_without_tracked_club: 0,
-      writes_executed: 0,
+      writes_executed: markerWrites,
       inserted: 0,
       refreshed: 0,
       reactivated: 0,
@@ -505,8 +646,37 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
     };
   }
 
-  const extractor = options.extractor || extractEventCandidates;
-  const events = extractor(article, { clubs }) || [];
+  const claim = await claimArticleEventRun(db, {
+    article,
+    processingInputHash,
+    phaseBInputHash: inputHash,
+    clubContextHash,
+    leaseMs: options.leaseMs
+  });
+
+  if (!claim.claimed) {
+    return {
+      article_id: article.id,
+      status: 'deferred',
+      persistence_version: EVENT_PERSISTENCE_VERSION,
+      extractor_version: EVENT_EXTRACTOR_VERSION,
+      content_source: article.content_source || 'none',
+      input_content_hash: article.input_content_hash || article.source_content_hash || '',
+      processing_input_hash: processingInputHash,
+      phase_b_input_hash: inputHash,
+      club_context_hash: clubContextHash,
+      current_club_context_hash: clubContextHash,
+      club_context_changed: false,
+      already_completed: false,
+      event_count: 0,
+      writes_executed: 0,
+      deferred_reason: 'lease_or_retry_gate'
+    };
+  }
+
+  try {
+    const extractor = options.extractor || extractEventCandidates;
+    const events = extractor(article, { clubs }) || [];
   const records = await Promise.all(events.map((event) =>
     buildEventCandidateRecord(article, event, {
       sourceContentHash: article.source_content_hash || '',
@@ -599,35 +769,50 @@ export async function persistPhaseBEventCandidatesForArticle(db, articleId, opti
   }
 
   statements.push(
-    insertArticleEventRunStatement(db, {
-      article,
+    completeArticleEventRunStatement(db, {
+      articleId: article.id,
       processingInputHash,
-      phaseBInputHash: inputHash,
-      clubContextHash,
+      leaseToken: claim.leaseToken,
       eventCount: records.length
     })
   );
 
   if (statements.length) await db.batch(statements);
 
-  return {
-    article_id: article.id,
-    status: 'persisted',
-    persistence_version: EVENT_PERSISTENCE_VERSION,
-    extractor_version: EVENT_EXTRACTOR_VERSION,
-    content_source: article.content_source || 'none',
-    processing_input_hash: processingInputHash,
-    phase_b_input_hash: inputHash,
-    club_context_hash: clubContextHash,
-    current_club_context_hash: clubContextHash,
-    club_context_changed: false,
-    already_completed: false,
-    event_count: records.length,
-    tracked_club_links: trackedClubLinks,
-    ambiguous_club_anchor_count: ambiguousClubAnchors,
-    unmatched_club_anchor_count: unmatchedClubAnchors,
-    events_without_tracked_club: eventsWithoutTrackedClub,
-    writes_executed: statements.length,
-    ...stats
-  };
+    return {
+      article_id: article.id,
+      status: 'persisted',
+      persistence_version: EVENT_PERSISTENCE_VERSION,
+      extractor_version: EVENT_EXTRACTOR_VERSION,
+      content_source: article.content_source || 'none',
+      input_content_hash: article.input_content_hash || article.source_content_hash || '',
+      processing_input_hash: processingInputHash,
+      phase_b_input_hash: inputHash,
+      club_context_hash: clubContextHash,
+      current_club_context_hash: clubContextHash,
+      club_context_changed: false,
+      already_completed: false,
+      event_count: records.length,
+      tracked_club_links: trackedClubLinks,
+      ambiguous_club_anchor_count: ambiguousClubAnchors,
+      unmatched_club_anchor_count: unmatchedClubAnchors,
+      events_without_tracked_club: eventsWithoutTrackedClub,
+      writes_executed: statements.length + 1,
+      inserted: stats.inserted,
+      refreshed: stats.refreshed,
+      reactivated: stats.reactivated,
+      unchanged: stats.unchanged,
+      superseded: stats.superseded,
+      club_links_added: stats.club_links_added,
+      club_links_removed: stats.club_links_removed
+    };
+  } catch (error) {
+    await markArticleEventRunRetry(db, {
+      articleId: article.id,
+      processingInputHash,
+      leaseToken: claim.leaseToken,
+      error
+    });
+    throw error;
+  }
 }

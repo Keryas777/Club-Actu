@@ -24,6 +24,9 @@ jobs:
           node --check src/sources.js
           node --check src/grouper.js
           node --check src/relevance-role.js
+          node --check src/index-phase-a-fix.js
+          node --check src/phase-b-event-persistence.js
+          node --check src/phase-b-event-queue.js
 
       - name: Run unit tests
         run: npm test
