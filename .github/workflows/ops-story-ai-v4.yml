@@ -1,0 +1,121 @@
+name: Ops STORY AI v4 identity gate
+
+on:
+  push:
+    branches:
+      - codex/d1-2-story-ai-v4-identity-gate
+    paths:
+      - .github/workflows/ops-story-ai-v4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-2-story-ai-v4-identity-gate
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Add deterministic club-pair identity gate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/story-ai-resolver.js')
+          s = p.read_text()
+          s = s.replace("export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v3';", "export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v4';", 1)
+
+          anchor = "function normalizeProviderValue(raw) {"
+          helper = '''function exactClubPair(event) {\n  const clubs = Array.isArray(event?.primary_clubs)\n    ? [...new Set(event.primary_clubs.map((club) => String(club || '').trim()).filter(Boolean))]\n    : [];\n  if (clubs.length !== 2) return null;\n  return clubs.map((club) => club.toLocaleLowerCase()).sort();\n}\n\nfunction sameClubPair(a, b) {\n  return Boolean(a && b && a.length === 2 && b.length === 2 && a[0] === b[0] && a[1] === b[1]);\n}\n\n'''
+          assert anchor in s
+          s = s.replace(anchor, helper + anchor, 1)
+
+          old_context = '''    newEventId = null,\n    memberEvidenceByStory = {}\n  } = context;'''
+          new_context = '''    newEventId = null,\n    memberEvidenceByStory = {},\n    eventEvidenceById = {}\n  } = context;'''
+          assert old_context in s
+          s = s.replace(old_context, new_context, 1)
+
+          old_attach = '''    if (!selectedMemberIds.some((id) => evidenceIds.includes(id))) {\n      throw new Error('ai_attach_missing_story_evidence');\n    }\n  } else if (storyId) {'''
+          new_attach = '''    if (!selectedMemberIds.some((id) => evidenceIds.includes(id))) {\n      throw new Error('ai_attach_missing_story_evidence');\n    }\n\n    // Deterministic identity gate: when both the incoming EVENT and at least one\n    // cited representative member identify exactly two clubs, an AI attach may\n    // not cross from one fixture pair to another. This blocks semantic shortcuts\n    // such as OL–Lens -> OL–Rennes merely because Paulo Fonseca is shared.\n    const incomingPair = exactClubPair(eventEvidenceById?.[String(newEventId)]);\n    if (incomingPair) {\n      const citedComparablePairs = selectedMemberIds\n        .filter((id) => evidenceIds.includes(id))\n        .map((id) => exactClubPair(eventEvidenceById?.[String(id)]))\n        .filter(Boolean);\n      if (citedComparablePairs.length && !citedComparablePairs.some((pair) => sameClubPair(incomingPair, pair))) {\n        throw new Error('ai_attach_club_pair_mismatch');\n      }\n    }\n  } else if (storyId) {'''
+          assert old_attach in s
+          s = s.replace(old_attach, new_attach, 1)
+
+          old_validation = '''  const validationContext = {\n    allowedStoryIds,\n    allowedEvidenceIds,\n    newEventId: input.event.event_id,\n    memberEvidenceByStory\n  };'''
+          new_validation = '''  const eventEvidenceById = { [String(input.event.event_id)]: input.event };\n  for (const candidate of input.candidates) {\n    for (const member of candidate.representative_members || []) {\n      if (member?.event_id) eventEvidenceById[String(member.event_id)] = member;\n    }\n  }\n  const validationContext = {\n    allowedStoryIds,\n    allowedEvidenceIds,\n    newEventId: input.event.event_id,\n    memberEvidenceByStory,\n    eventEvidenceById\n  };'''
+          assert old_validation in s
+          s = s.replace(old_validation, new_validation, 1)
+          p.write_text(s)
+
+          t = Path('test/story-ai-resolver.test.js')
+          ts = t.read_text()
+          addition = r'''
+
+test('attach cannot cross an explicit two-club fixture identity', () => {
+  const context = {
+    allowedStoryIds: ['story-rennes'],
+    allowedEvidenceIds: ['event-lens', 'member-rennes'],
+    newEventId: 'event-lens',
+    memberEvidenceByStory: { 'story-rennes': ['member-rennes'] },
+    eventEvidenceById: {
+      'event-lens': { primary_clubs: ['Olympique Lyonnais', 'RC Lens'] },
+      'member-rennes': { primary_clubs: ['Olympique Lyonnais', 'Stade Rennais'] }
+    }
+  };
+  assert.throws(() => parseStoryAiResponse({
+    decision: 'attach',
+    story_id: 'story-rennes',
+    confidence: 0.8,
+    rationale: 'Même entraîneur et même club.',
+    evidence_event_ids: ['event-lens', 'member-rennes']
+  }, context), /ai_attach_club_pair_mismatch/);
+});
+
+test('attach keeps working when cited evidence has the same explicit club pair', () => {
+  const context = {
+    allowedStoryIds: ['story-rennes'],
+    allowedEvidenceIds: ['event-rennes', 'member-rennes'],
+    newEventId: 'event-rennes',
+    memberEvidenceByStory: { 'story-rennes': ['member-rennes'] },
+    eventEvidenceById: {
+      'event-rennes': { primary_clubs: ['Stade Rennais', 'Olympique Lyonnais'] },
+      'member-rennes': { primary_clubs: ['Olympique Lyonnais', 'Stade Rennais'] }
+    }
+  };
+  const parsed = parseStoryAiResponse({
+    decision: 'attach',
+    story_id: 'story-rennes',
+    confidence: 0.8,
+    rationale: 'Même rencontre OL-Rennes.',
+    evidence_event_ids: ['event-rennes', 'member-rennes']
+  }, context);
+  assert.equal(parsed.decision, 'attach');
+  assert.equal(parsed.story_id, 'story-rennes');
+});
+'''
+          if "attach cannot cross an explicit two-club fixture identity" not in ts:
+              ts += addition
+          t.write_text(ts)
+          PY
+
+      - name: Validate
+        run: |
+          set -euo pipefail
+          node --check src/story-ai-resolver.js
+          npm test
+
+      - name: Commit and remove temporary workflow
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ops-story-ai-v4.yml
+          git add src/story-ai-resolver.js test/story-ai-resolver.test.js
+          git commit -m 'D1.2: block AI attaches across explicit fixture pairs'
+          git push origin HEAD:codex/d1-2-story-ai-v4-identity-gate
