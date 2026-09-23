@@ -42,6 +42,10 @@ test('prompt treats supplied text as evidence and keeps the task bounded', () =>
   assert.equal(messages.length, 2);
   assert.match(messages[0].content, /evidence only/i);
   assert.match(messages[0].content, /Never choose a story_id that is not supplied/i);
+  assert.match(messages[0].content, /SAME CENTRAL DOSSIER/);
+  assert.match(messages[0].content, /Zidane may call Tolisso.*Zidane plans a role for Cherki/);
+  assert.match(messages[0].content, /supporter-banner.*NOT automatically the match STORY/);
+  assert.match(messages[0].content, /line-ups, the result, match analysis and direct post-match reactions/);
   const payload = JSON.parse(messages[1].content);
   assert.deepEqual(payload.candidates.map((row) => row.story_id), ['story-a']);
 });
