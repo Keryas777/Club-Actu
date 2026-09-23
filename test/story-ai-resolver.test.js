@@ -176,3 +176,40 @@ test('missing AI binding fails explicitly without inventing a decision', async (
   assert.equal(result.error, 'story_ai_not_configured');
   assert.equal(result.decision, undefined);
 });
+
+test('attach cannot cross an explicit two-club fixture identity', () => {
+  const context = {
+    allowedStoryIds: ['story-rennes'],
+    allowedEvidenceIds: ['event-lens', 'member-rennes'],
+    newEventId: 'event-lens',
+    memberEvidenceByStory: { 'story-rennes': ['member-rennes'] },
+    eventEvidenceById: {
+      'event-lens': { primary_clubs: ['Olympique Lyonnais', 'RC Lens'] },
+      'member-rennes': { primary_clubs: ['Olympique Lyonnais', 'Stade Rennais'] }
+    }
+  };
+  assert.throws(() => parseStoryAiResponse({
+    decision: 'attach', story_id: 'story-rennes', confidence: 0.8,
+    rationale: 'Même entraîneur et même club.',
+    evidence_event_ids: ['event-lens', 'member-rennes']
+  }, context), /ai_attach_club_pair_mismatch/);
+});
+
+test('attach keeps working with the same explicit club pair', () => {
+  const context = {
+    allowedStoryIds: ['story-rennes'],
+    allowedEvidenceIds: ['event-rennes', 'member-rennes'],
+    newEventId: 'event-rennes',
+    memberEvidenceByStory: { 'story-rennes': ['member-rennes'] },
+    eventEvidenceById: {
+      'event-rennes': { primary_clubs: ['Stade Rennais', 'Olympique Lyonnais'] },
+      'member-rennes': { primary_clubs: ['Olympique Lyonnais', 'Stade Rennais'] }
+    }
+  };
+  const parsed = parseStoryAiResponse({
+    decision: 'attach', story_id: 'story-rennes', confidence: 0.8,
+    rationale: 'Même rencontre OL-Rennes.',
+    evidence_event_ids: ['event-rennes', 'member-rennes']
+  }, context);
+  assert.equal(parsed.decision, 'attach');
+});

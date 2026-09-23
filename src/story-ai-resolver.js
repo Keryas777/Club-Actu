@@ -1,6 +1,6 @@
 import { clampInteger, cleanError } from './story-matching-core.js';
 
-export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v3';
+export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v4';
 export const DEFAULT_STORY_AI_PROVIDER = 'workers_ai';
 export const DEFAULT_STORY_AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const DEFAULT_STORY_AI_LIMIT = 1;
@@ -158,6 +158,18 @@ export function buildStoryAiPrompt(input) {
   ];
 }
 
+function exactClubPair(event) {
+  const clubs = Array.isArray(event?.primary_clubs)
+    ? [...new Set(event.primary_clubs.map((club) => String(club || '').trim()).filter(Boolean))]
+    : [];
+  if (clubs.length !== 2) return null;
+  return clubs.map((club) => club.toLocaleLowerCase()).sort();
+}
+
+function sameClubPair(a, b) {
+  return Boolean(a && b && a.length === 2 && b.length === 2 && a[0] === b[0] && a[1] === b[1]);
+}
+
 function normalizeProviderValue(raw) {
   let value = raw;
   if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'response')) value = value.response;
@@ -172,7 +184,8 @@ export function parseStoryAiResponse(raw, context = {}) {
     allowedStoryIds = [],
     allowedEvidenceIds = [],
     newEventId = null,
-    memberEvidenceByStory = {}
+    memberEvidenceByStory = {},
+    eventEvidenceById = {}
   } = context;
   const value = normalizeProviderValue(raw);
   const decision = String(value?.decision || '').trim();
@@ -200,6 +213,19 @@ export function parseStoryAiResponse(raw, context = {}) {
     if (!selectedMemberIds.length) throw new Error('ai_attach_without_story_member_evidence');
     if (!selectedMemberIds.some((id) => evidenceIds.includes(id))) {
       throw new Error('ai_attach_missing_story_evidence');
+    }
+
+    // Hard identity gate: explicit two-club fixture evidence may not be attached
+    // across a different explicit two-club fixture merely because context overlaps.
+    const incomingPair = exactClubPair(eventEvidenceById?.[String(newEventId)]);
+    if (incomingPair) {
+      const citedComparablePairs = selectedMemberIds
+        .filter((id) => evidenceIds.includes(id))
+        .map((id) => exactClubPair(eventEvidenceById?.[String(id)]))
+        .filter(Boolean);
+      if (citedComparablePairs.length && !citedComparablePairs.some((pair) => sameClubPair(incomingPair, pair))) {
+        throw new Error('ai_attach_club_pair_mismatch');
+      }
     }
   } else if (storyId) {
     throw new Error('ai_non_attach_has_story_id');
@@ -234,11 +260,18 @@ export async function resolveStoryAmbiguityWithProvider(env, input) {
     memberEvidenceByStory[candidate.story_id] = memberIds;
     allowedEvidenceIds.push(...memberIds);
   }
+  const eventEvidenceById = { [String(input.event.event_id)]: input.event };
+  for (const candidate of input.candidates) {
+    for (const member of candidate.representative_members || []) {
+      if (member?.event_id) eventEvidenceById[String(member.event_id)] = member;
+    }
+  }
   const validationContext = {
     allowedStoryIds,
     allowedEvidenceIds,
     newEventId: input.event.event_id,
-    memberEvidenceByStory
+    memberEvidenceByStory,
+    eventEvidenceById
   };
   const messages = buildStoryAiPrompt(input);
 
