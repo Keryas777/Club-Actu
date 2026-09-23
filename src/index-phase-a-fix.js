@@ -284,6 +284,41 @@ async function storyMatchBatchEndpoint(request, env, url) {
   }
 }
 
+async function storyAiBatchEndpoint(request, env, url) {
+  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+  if (!env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+  }
+
+  const token = bearerToken(request);
+  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+    return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  const limit = parseLimit(url, 1, 4);
+  const rawAttemptId = Number(url.searchParams.get("attempt_id") || 0);
+  const attemptId = Number.isInteger(rawAttemptId) && rawAttemptId > 0 ? rawAttemptId : null;
+
+  try {
+    const { processStoryAiBatch } = await import("./story-ai-resolver.js");
+    const result = await processStoryAiBatch(env.DB, env, {
+      limit,
+      attemptId,
+      maxDurationMs: Number(env.STORY_AI_MAX_DURATION_MS || 30000)
+    });
+    return json({ ok: true, trigger: "process_story_ai_batch", mode: "shadow_review", ...result });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("story-ai-batch failed", { name, message, limit, attemptId });
+    return json({
+      ok: false,
+      error: "story_ai_batch_failed",
+      diagnostic: { name, message, limit, attempt_id: attemptId }
+    }, { status: 500 });
+  }
+}
+
 async function phaseBEventPersistenceEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -362,6 +397,10 @@ export default {
 
     if (url.pathname === "/api/process-story-match-batch" && request.method === "POST") {
       return storyMatchBatchEndpoint(request, env, url);
+    }
+
+    if (url.pathname === "/api/process-story-ai-batch" && request.method === "POST") {
+      return storyAiBatchEndpoint(request, env, url);
     }
 
     return baseWorker.fetch(request, env, ctx);
