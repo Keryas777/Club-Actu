@@ -53,7 +53,12 @@ test('parser accepts an attach only to an allowed candidate and cited evidence',
     confidence: 0.86,
     rationale: 'Même match et même résultat.',
     evidence_event_ids: ['new-event', 'member-a']
-  }, ['story-a'], ['new-event', 'member-a']);
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  });
   assert.equal(result.decision, 'attach');
   assert.equal(result.story_id, 'story-a');
   assert.equal(result.confidence, 0.86);
@@ -66,7 +71,12 @@ test('parser rejects an attach outside the exact candidate set', () => {
     confidence: 0.9,
     rationale: 'Même sujet.',
     evidence_event_ids: ['new-event']
-  }, ['story-a'], ['new-event']), /ai_story_not_in_candidate_set/);
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  }), /ai_story_not_in_candidate_set/);
 });
 
 test('parser requires null story_id for new_story and unsure', () => {
@@ -76,7 +86,12 @@ test('parser requires null story_id for new_story and unsure', () => {
     confidence: 0.8,
     rationale: 'Sujet distinct.',
     evidence_event_ids: ['new-event']
-  }, ['story-a'], ['new-event']), /ai_non_attach_has_story_id/);
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  }), /ai_non_attach_has_story_id/);
 });
 
 test('parser rejects evidence ids that were not supplied to the model', () => {
@@ -85,8 +100,41 @@ test('parser rejects evidence ids that were not supplied to the model', () => {
     story_id: 'story-a',
     confidence: 0.8,
     rationale: 'Même sujet.',
-    evidence_event_ids: ['invented-event']
-  }, ['story-a'], ['new-event', 'member-a']), /ai_unknown_evidence_event/);
+    evidence_event_ids: ['new-event', 'member-a', 'invented-event']
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  }), /ai_unknown_evidence_event/);
+});
+
+test('attach requires evidence from the new EVENT and the selected STORY', () => {
+  assert.throws(() => parseStoryAiResponse({
+    decision: 'attach',
+    story_id: 'story-a',
+    confidence: 0.7,
+    rationale: 'Même sujet.',
+    evidence_event_ids: ['new-event']
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  }), /ai_attach_missing_story_evidence/);
+
+  assert.throws(() => parseStoryAiResponse({
+    decision: 'attach',
+    story_id: 'story-a',
+    confidence: 0.7,
+    rationale: 'Même sujet.',
+    evidence_event_ids: ['member-a']
+  }, {
+    allowedStoryIds: ['story-a'],
+    allowedEvidenceIds: ['new-event', 'member-a'],
+    newEventId: 'new-event',
+    memberEvidenceByStory: { 'story-a': ['member-a'] }
+  }), /ai_attach_missing_new_event_evidence/);
 });
 
 test('Workers AI adapter requests JSON schema and validates the response', async () => {

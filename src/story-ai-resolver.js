@@ -1,6 +1,6 @@
 import { clampInteger, cleanError } from './story-matching-core.js';
 
-export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v1';
+export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v2';
 export const DEFAULT_STORY_AI_PROVIDER = 'workers_ai';
 export const DEFAULT_STORY_AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const DEFAULT_STORY_AI_LIMIT = 1;
@@ -145,6 +145,7 @@ export function buildStoryAiPrompt(input) {
         '(for example transfer rumor → negotiation → agreement → official announcement), but generic overlap in club, player or competition is not enough. ' +
         'Attach only when the new EVENT is clearly another update or report about the same underlying subject. Choose new_story when it is a distinct subject. ' +
         'Choose unsure whenever the supplied evidence is insufficient or genuinely balanced. Never choose a story_id that is not supplied. ' +
+        'For attach, evidence_event_ids must include the new EVENT id and at least one representative member EVENT id from the selected STORY; if no representative member is supplied, do not attach. ' +
         'Do not invent facts. Keep the rationale short and factual, in French. Cite only supplied EVENT ids in evidence_event_ids.'
     },
     { role: 'user', content: JSON.stringify(input) }
@@ -160,7 +161,13 @@ function normalizeProviderValue(raw) {
   return value;
 }
 
-export function parseStoryAiResponse(raw, allowedStoryIds = [], allowedEvidenceIds = []) {
+export function parseStoryAiResponse(raw, context = {}) {
+  const {
+    allowedStoryIds = [],
+    allowedEvidenceIds = [],
+    newEventId = null,
+    memberEvidenceByStory = {}
+  } = context;
   const value = normalizeProviderValue(raw);
   const decision = String(value?.decision || '').trim();
   const storyId = value?.story_id == null ? null : String(value.story_id).trim();
@@ -179,6 +186,15 @@ export function parseStoryAiResponse(raw, allowedStoryIds = [], allowedEvidenceI
   if (decision === 'attach') {
     if (!storyId || !allowedStories.has(storyId)) throw new Error('ai_story_not_in_candidate_set');
     if (!evidenceIds.length) throw new Error('ai_attach_without_evidence');
+    if (!newEventId) throw new Error('ai_attach_evidence_contract_missing');
+    if (!evidenceIds.includes(String(newEventId))) throw new Error('ai_attach_missing_new_event_evidence');
+    const selectedMemberIds = Array.isArray(memberEvidenceByStory?.[storyId])
+      ? memberEvidenceByStory[storyId].map(String)
+      : [];
+    if (!selectedMemberIds.length) throw new Error('ai_attach_without_story_member_evidence');
+    if (!selectedMemberIds.some((id) => evidenceIds.includes(id))) {
+      throw new Error('ai_attach_missing_story_evidence');
+    }
   } else if (storyId) {
     throw new Error('ai_non_attach_has_story_id');
   }
@@ -206,9 +222,18 @@ export async function resolveStoryAmbiguityWithProvider(env, input) {
   const config = storyAiProviderConfig(env);
   const allowedStoryIds = input.candidates.map((candidate) => candidate.story_id);
   const allowedEvidenceIds = [input.event.event_id];
+  const memberEvidenceByStory = {};
   for (const candidate of input.candidates) {
-    for (const member of candidate.representative_members || []) allowedEvidenceIds.push(member.event_id);
+    const memberIds = (candidate.representative_members || []).map((member) => member.event_id).filter(Boolean);
+    memberEvidenceByStory[candidate.story_id] = memberIds;
+    allowedEvidenceIds.push(...memberIds);
   }
+  const validationContext = {
+    allowedStoryIds,
+    allowedEvidenceIds,
+    newEventId: input.event.event_id,
+    memberEvidenceByStory
+  };
   const messages = buildStoryAiPrompt(input);
 
   if (config.provider === 'workers_ai') {
@@ -227,7 +252,7 @@ export async function resolveStoryAmbiguityWithProvider(env, input) {
         provider: config.provider,
         model: config.model,
         attempts: 1,
-        ...parseStoryAiResponse(raw, allowedStoryIds, allowedEvidenceIds)
+        ...parseStoryAiResponse(raw, validationContext)
       };
     } catch (error) {
       return { configured: true, provider: config.provider, model: config.model, attempts: 1, error: cleanError(error) };
@@ -270,7 +295,7 @@ export async function resolveStoryAmbiguityWithProvider(env, input) {
         provider: config.provider,
         model: config.model,
         attempts: 1,
-        ...parseStoryAiResponse(extractOpenAiText(payload), allowedStoryIds, allowedEvidenceIds)
+        ...parseStoryAiResponse(extractOpenAiText(payload), validationContext)
       };
     } catch (error) {
       return { configured: true, provider: config.provider, model: config.model, attempts: 1, error: cleanError(error) };
