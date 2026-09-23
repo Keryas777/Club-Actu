@@ -1,0 +1,65 @@
+name: Run STORY ambiguity AI now
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Number of AMBIGUOUS_AI attempts to evaluate (1-4)
+        required: false
+        default: '1'
+      attempt_id:
+        description: Optional exact story_match_attempts id
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Call shadow STORY AI resolver
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+          INPUT_LIMIT: ${{ inputs.limit }}
+          INPUT_ATTEMPT_ID: ${{ inputs.attempt_id }}
+        run: |
+          set -euo pipefail
+          limit="${INPUT_LIMIT:-1}"
+          if ! [[ "$limit" =~ ^[0-9]+$ ]] || [ "$limit" -lt 1 ] || [ "$limit" -gt 4 ]; then
+            echo 'limit must be an integer from 1 to 4' >&2
+            exit 2
+          fi
+          url="$BASE_URL/api/process-story-ai-batch?limit=$limit"
+          if [ -n "${INPUT_ATTEMPT_ID:-}" ]; then
+            if ! [[ "$INPUT_ATTEMPT_ID" =~ ^[0-9]+$ ]]; then
+              echo 'attempt_id must be an integer' >&2
+              exit 2
+            fi
+            url="$url&attempt_id=$INPUT_ATTEMPT_ID"
+          fi
+          status="$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+            --header 'Accept: application/json' \
+            "$url")"
+          cat response.json
+          echo
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then exit 1; fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d=json.load(open('response.json',encoding='utf-8'))
+          print('# STORY ambiguity AI — shadow review')
+          for k in ['candidates','claimed','review_pending','attach','new_story','unsure','stale','retry','failed','skipped','stop_reason','elapsed_ms']:
+              if k in d: print(f'- {k}: **{d[k]}**')
+          for item in d.get('decisions',[]):
+              print(f"\n## attempt {item.get('attempt_id')} / EVENT {item.get('event_id')}")
+              print(f"- outcome: `{item.get('outcome')}`")
+              if item.get('decision'): print(f"- decision: `{item.get('decision')}`")
+              if item.get('story_id'): print(f"- story: `{item.get('story_id')}`")
+              if item.get('confidence') is not None: print(f"- confidence: `{item.get('confidence')}`")
+              if item.get('rationale'): print(f"- rationale: {item.get('rationale')}")
+          PY
