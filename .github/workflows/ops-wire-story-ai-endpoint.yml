@@ -1,0 +1,56 @@
+name: Ops wire STORY AI shadow endpoint
+
+on:
+  push:
+    branches:
+      - codex/d1-story-ai-ambiguity
+    paths:
+      - .github/workflows/ops-wire-story-ai-endpoint.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-story-ai-ambiguity
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Wire protected shadow endpoint
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/index-phase-a-fix.js')
+          s=p.read_text()
+          if 'async function storyAiBatchEndpoint(' not in s:
+              marker='async function phaseBEventPersistenceEndpoint(request, env, url) {'
+              endpoint='''async function storyAiBatchEndpoint(request, env, url) {\n  if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });\n  if (!env.MANUAL_TRIGGER_TOKEN) {\n    return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });\n  }\n\n  const token = bearerToken(request);\n  if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {\n    return json({ ok: false, error: "Unauthorized" }, { status: 401 });\n  }\n\n  const limit = parseLimit(url, 1, 4);\n  const rawAttemptId = Number(url.searchParams.get("attempt_id") || 0);\n  const attemptId = Number.isInteger(rawAttemptId) && rawAttemptId > 0 ? rawAttemptId : null;\n\n  try {\n    const { processStoryAiBatch } = await import("./story-ai-resolver.js");\n    const result = await processStoryAiBatch(env.DB, env, {\n      limit,\n      attemptId,\n      maxDurationMs: Number(env.STORY_AI_MAX_DURATION_MS || 30000)\n    });\n    return json({ ok: true, trigger: "process_story_ai_batch", mode: "shadow_review", ...result });\n  } catch (error) {\n    const name = error instanceof Error ? error.name : "Error";\n    const message = error instanceof Error ? error.message : String(error);\n    console.error("story-ai-batch failed", { name, message, limit, attemptId });\n    return json({\n      ok: false,\n      error: "story_ai_batch_failed",\n      diagnostic: { name, message, limit, attempt_id: attemptId }\n    }, { status: 500 });\n  }\n}\n\n'''
+              if marker not in s:
+                  raise SystemExit('endpoint insertion marker missing')
+              s=s.replace(marker, endpoint+marker, 1)
+          if 'url.pathname === "/api/process-story-ai-batch"' not in s:
+              marker='''    if (url.pathname === "/api/process-story-match-batch" && request.method === "POST") {\n      return storyMatchBatchEndpoint(request, env, url);\n    }\n'''
+              route='''\n    if (url.pathname === "/api/process-story-ai-batch" && request.method === "POST") {\n      return storyAiBatchEndpoint(request, env, url);\n    }\n'''
+              if marker not in s:
+                  raise SystemExit('route insertion marker missing')
+              s=s.replace(marker, marker+route, 1)
+          p.write_text(s)
+          PY
+      - name: Validate syntax and full test suite
+        run: |
+          node --check src/story-ai-resolver.js
+          node --check src/index-phase-a-fix.js
+          npm test
+      - name: Commit source change and remove temporary workflow
+        run: |
+          rm .github/workflows/ops-wire-story-ai-endpoint.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/index-phase-a-fix.js .github/workflows/ops-wire-story-ai-endpoint.yml
+          git commit -m 'D1.2: wire manual STORY ambiguity shadow endpoint'
+          git push origin HEAD:codex/d1-story-ai-ambiguity
