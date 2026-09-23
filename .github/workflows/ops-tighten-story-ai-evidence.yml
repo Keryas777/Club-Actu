@@ -1,0 +1,75 @@
+name: Ops tighten STORY AI attach evidence contract
+
+on:
+  push:
+    branches:
+      - codex/d1-story-ai-evidence-contract
+    paths:
+      - .github/workflows/ops-tighten-story-ai-evidence.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-story-ai-evidence-contract
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Tighten parser and prompt contract
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/story-ai-resolver.js')
+          s=p.read_text()
+          s=s.replace("export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v1';", "export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v2';")
+          old="""        'Choose unsure whenever the supplied evidence is insufficient or genuinely balanced. Never choose a story_id that is not supplied. ' +\n        'Do not invent facts. Keep the rationale short and factual, in French. Cite only supplied EVENT ids in evidence_event_ids.'"""
+          new="""        'Choose unsure whenever the supplied evidence is insufficient or genuinely balanced. Never choose a story_id that is not supplied. ' +\n        'For attach, evidence_event_ids must include the new EVENT id and at least one representative member EVENT id from the selected STORY; if no representative member is supplied, do not attach. ' +\n        'Do not invent facts. Keep the rationale short and factual, in French. Cite only supplied EVENT ids in evidence_event_ids.'"""
+          if old not in s: raise SystemExit('prompt marker missing')
+          s=s.replace(old,new,1)
+          old="export function parseStoryAiResponse(raw, allowedStoryIds = [], allowedEvidenceIds = []) {\n  const value = normalizeProviderValue(raw);"
+          new="""export function parseStoryAiResponse(raw, context = {}) {\n  const {\n    allowedStoryIds = [],\n    allowedEvidenceIds = [],\n    newEventId = null,\n    memberEvidenceByStory = {}\n  } = context;\n  const value = normalizeProviderValue(raw);"""
+          if old not in s: raise SystemExit('parser signature marker missing')
+          s=s.replace(old,new,1)
+          old="""  if (decision === 'attach') {\n    if (!storyId || !allowedStories.has(storyId)) throw new Error('ai_story_not_in_candidate_set');\n    if (!evidenceIds.length) throw new Error('ai_attach_without_evidence');\n  } else if (storyId) {"""
+          new="""  if (decision === 'attach') {\n    if (!storyId || !allowedStories.has(storyId)) throw new Error('ai_story_not_in_candidate_set');\n    if (!evidenceIds.length) throw new Error('ai_attach_without_evidence');\n    if (!newEventId) throw new Error('ai_attach_evidence_contract_missing');\n    if (!evidenceIds.includes(String(newEventId))) throw new Error('ai_attach_missing_new_event_evidence');\n    const selectedMemberIds = Array.isArray(memberEvidenceByStory?.[storyId])\n      ? memberEvidenceByStory[storyId].map(String)\n      : [];\n    if (!selectedMemberIds.length) throw new Error('ai_attach_without_story_member_evidence');\n    if (!selectedMemberIds.some((id) => evidenceIds.includes(id))) {\n      throw new Error('ai_attach_missing_story_evidence');\n    }\n  } else if (storyId) {"""
+          if old not in s: raise SystemExit('attach validation marker missing')
+          s=s.replace(old,new,1)
+          old="""  const allowedStoryIds = input.candidates.map((candidate) => candidate.story_id);\n  const allowedEvidenceIds = [input.event.event_id];\n  for (const candidate of input.candidates) {\n    for (const member of candidate.representative_members || []) allowedEvidenceIds.push(member.event_id);\n  }\n  const messages = buildStoryAiPrompt(input);"""
+          new="""  const allowedStoryIds = input.candidates.map((candidate) => candidate.story_id);\n  const allowedEvidenceIds = [input.event.event_id];\n  const memberEvidenceByStory = {};\n  for (const candidate of input.candidates) {\n    const memberIds = (candidate.representative_members || []).map((member) => member.event_id).filter(Boolean);\n    memberEvidenceByStory[candidate.story_id] = memberIds;\n    allowedEvidenceIds.push(...memberIds);\n  }\n  const validationContext = {\n    allowedStoryIds,\n    allowedEvidenceIds,\n    newEventId: input.event.event_id,\n    memberEvidenceByStory\n  };\n  const messages = buildStoryAiPrompt(input);"""
+          if old not in s: raise SystemExit('provider context marker missing')
+          s=s.replace(old,new,1)
+          s=s.replace('...parseStoryAiResponse(raw, allowedStoryIds, allowedEvidenceIds)', '...parseStoryAiResponse(raw, validationContext)')
+          s=s.replace('...parseStoryAiResponse(extractOpenAiText(payload), allowedStoryIds, allowedEvidenceIds)', '...parseStoryAiResponse(extractOpenAiText(payload), validationContext)')
+          p.write_text(s)
+
+          p=Path('test/story-ai-resolver.test.js')
+          s=p.read_text()
+          context="""{\n    allowedStoryIds: ['story-a'],\n    allowedEvidenceIds: ['new-event', 'member-a'],\n    newEventId: 'new-event',\n    memberEvidenceByStory: { 'story-a': ['member-a'] }\n  }"""
+          s=s.replace("}, ['story-a'], ['new-event', 'member-a']);", "}, "+context+");")
+          s=s.replace("}, ['story-a'], ['new-event']), /ai_story_not_in_candidate_set/);", "}, "+context+"), /ai_story_not_in_candidate_set/);")
+          s=s.replace("}, ['story-a'], ['new-event']), /ai_non_attach_has_story_id/);", "}, "+context+"), /ai_non_attach_has_story_id/);")
+          s=s.replace("}, ['story-a'], ['new-event', 'member-a']), /ai_unknown_evidence_event/);", "}, "+context+"), /ai_unknown_evidence_event/);")
+          anchor="""test('Workers AI adapter requests JSON schema and validates the response', async () => {"""
+          extra="""test('attach requires evidence from the new EVENT and the selected STORY', () => {\n  assert.throws(() => parseStoryAiResponse({\n    decision: 'attach',\n    story_id: 'story-a',\n    confidence: 0.7,\n    rationale: 'Même sujet.',\n    evidence_event_ids: ['new-event']\n  }, {\n    allowedStoryIds: ['story-a'],\n    allowedEvidenceIds: ['new-event', 'member-a'],\n    newEventId: 'new-event',\n    memberEvidenceByStory: { 'story-a': ['member-a'] }\n  }), /ai_attach_missing_story_evidence/);\n\n  assert.throws(() => parseStoryAiResponse({\n    decision: 'attach',\n    story_id: 'story-a',\n    confidence: 0.7,\n    rationale: 'Même sujet.',\n    evidence_event_ids: ['member-a']\n  }, {\n    allowedStoryIds: ['story-a'],\n    allowedEvidenceIds: ['new-event', 'member-a'],\n    newEventId: 'new-event',\n    memberEvidenceByStory: { 'story-a': ['member-a'] }\n  }), /ai_attach_missing_new_event_evidence/);\n});\n\n"""
+          if anchor not in s: raise SystemExit('test anchor missing')
+          s=s.replace(anchor, extra+anchor, 1)
+          p.write_text(s)
+          PY
+      - name: Validate syntax and full suite
+        run: |
+          node --check src/story-ai-resolver.js
+          npm test
+      - name: Commit fix and remove temporary workflow
+        run: |
+          rm .github/workflows/ops-tighten-story-ai-evidence.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/story-ai-resolver.js test/story-ai-resolver.test.js .github/workflows/ops-tighten-story-ai-evidence.yml
+          git commit -m 'D1.2: require bilateral evidence for AI attaches'
+          git push origin HEAD:codex/d1-story-ai-evidence-contract
