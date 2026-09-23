@@ -1,0 +1,56 @@
+name: Ops D1.2 v2 STORY AI cohort
+
+on:
+  push:
+    branches:
+      - codex/d1-story-ai-smoke
+    paths:
+      - .github/workflows/ops-d1-story-ai-v2-cohort.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cohort:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Run three bounded shadow batches
+        env:
+          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
+          BASE_URL: https://club-actu.deliriousfan7.workers.dev
+        run: |
+          set -euo pipefail
+          started="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "$started" > started_at.txt
+          for i in 1 2 3; do
+            status="$(curl --silent --show-error --output "response-$i.json" --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+              --header 'Accept: application/json' \
+              "$BASE_URL/api/process-story-ai-batch?limit=4")"
+            echo "=== BATCH $i / HTTP $status ==="
+            cat "response-$i.json"
+            echo
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then exit 20; fi
+            candidates="$(python3 -c "import json; print(json.load(open('response-$i.json')).get('candidates',0))")"
+            if [ "$candidates" -eq 0 ]; then break; fi
+          done
+      - name: Audit successful v2 reviews and stale/retry outcomes
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          started="$(cat started_at.txt)"
+          echo '=== TOUCHED ATTEMPTS ==='
+          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id, a.event_id, ROUND(a.best_hybrid_score,6) hybrid, a.family_compatible, a.ai_status, a.ai_attempts, a.ai_prompt_version, a.ai_error_code, a.ai_response_json, e.family, e.primary_people_json people, e.primary_clubs_json clubs, r.source_id, r.title, substr(e.evidence_json,1,1200) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.updated_at >= '$started' AND a.decision='AMBIGUOUS_AI' ORDER BY a.updated_at,a.id;"
+          echo '=== REVIEWED DECISION CANDIDATE CONTEXT (UP TO 3 MEMBERS) ==='
+          npx wrangler d1 execute DB --remote --command "WITH reviewed AS (SELECT a.id attempt_id, a.event_id, a.best_story_id, json_extract(a.ai_response_json,'$.decision') ai_decision, json_extract(a.ai_response_json,'$.story_id') ai_story_id, json_extract(a.ai_response_json,'$.confidence') confidence FROM story_match_attempts a WHERE a.updated_at >= '$started' AND a.ai_status='review_pending'), contexts AS (SELECT reviewed.*, COALESCE(reviewed.ai_story_id,reviewed.best_story_id) context_story_id, se.event_id member_event_id, m.family member_family, mr.source_id member_source, mr.title member_title, substr(m.evidence_json,1,1200) member_evidence, ROW_NUMBER() OVER (PARTITION BY reviewed.attempt_id ORDER BY se.assigned_at,se.event_id) rn FROM reviewed LEFT JOIN story_events se ON se.story_id=COALESCE(reviewed.ai_story_id,reviewed.best_story_id) AND se.membership_status='active' LEFT JOIN event_candidates m ON m.id=se.event_id LEFT JOIN raw_articles mr ON mr.id=m.article_id) SELECT attempt_id,event_id,ai_decision,ai_story_id,confidence,context_story_id,member_event_id,member_family,member_source,member_title,member_evidence FROM contexts WHERE rn<=3 ORDER BY attempt_id,rn;"
+          echo '=== SHADOW MEMBERSHIP BARRIER ==='
+          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id, a.event_id, a.ai_status, se.story_id, se.assignment_kind FROM story_match_attempts a LEFT JOIN story_events se ON se.event_id=a.event_id AND se.membership_status='active' WHERE a.updated_at >= '$started' AND a.decision='AMBIGUOUS_AI' ORDER BY a.id;"
