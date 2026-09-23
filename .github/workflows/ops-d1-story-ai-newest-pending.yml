@@ -1,0 +1,32 @@
+name: Ops D1.2 newest pending ambiguities
+
+on:
+  push:
+    branches:
+      - codex/d1-story-ai-smoke
+    paths:
+      - .github/workflows/ops-d1-story-ai-newest-pending.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: List newest pending ambiguity attempts
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          echo '=== NEWEST PENDING AMBIGUOUS_AI ==='
+          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,a.created_at,a.ai_status,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,e.family,e.primary_people_json people,e.primary_clubs_json clubs,r.source_id,r.title FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.decision='AMBIGUOUS_AI' AND e.lifecycle_status='active' AND e.match_status='ambiguous_ai' AND a.ai_status='pending' ORDER BY a.id DESC LIMIT 24;"
+          echo '=== CURRENT AI STATUS DISTRIBUTION ==='
+          npx wrangler d1 execute DB --remote --command "SELECT ai_status,COUNT(*) n FROM story_match_attempts WHERE decision='AMBIGUOUS_AI' GROUP BY ai_status ORDER BY n DESC;"
