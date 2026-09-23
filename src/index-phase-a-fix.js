@@ -198,6 +198,29 @@ async function scheduledEventEmbeddings(env) {
 }
 
 
+async function scheduledStoryMatching(env) {
+  if (!env.DB) return null;
+  try {
+    const { processStoryMatchBatch } = await import("./story-matcher.js");
+    const rawLimit = Number(env.STORY_MATCH_BATCH_LIMIT || 4);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(8, Math.trunc(rawLimit)))
+      : 4;
+    const result = await processStoryMatchBatch(env.DB, {
+      limit,
+      maxDurationMs: Number(env.STORY_MATCH_MAX_DURATION_MS || 12000)
+    });
+    console.log("story-match-batch", result);
+    return result;
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    // STORY matching must never break collection / Phase A / EVENT / embeddings.
+    console.error("story-match-batch failed", { name, message });
+    return { ok: false, name, message };
+  }
+}
+
 async function eventEmbeddingStorageRepairEndpoint(request, env, url) {
   if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
   if (!env.MANUAL_TRIGGER_TOKEN) {
@@ -345,9 +368,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Preserve collection + Phase A, then run the already-validated bounded EVENT
-    // persistence and embedding queues independently. STORY matching remains manual
-    // until its real D1 smoke test is validated.
+    // Preserve collection + Phase A, then run the validated bounded EVENT persistence,
+    // embedding and STORY queues independently. Each queue owns its own failure boundary.
     baseWorker.scheduled(event, env, ctx);
     ctx.waitUntil(
       repairPhaseAResiduals(env.DB, env, {
@@ -359,8 +381,9 @@ export default {
       })
     );
     ctx.waitUntil(scheduledPhaseBEventPersistence(env));
-    // Embeddings run independently. EVENTs created in this same cron may wait
-    // until the next cycle, which keeps the pipeline bounded and loosely coupled.
+    // Downstream queues run independently. EVENTs created or embedded in this same cron
+    // may wait until the next cycle, which keeps the pipeline bounded and loosely coupled.
     ctx.waitUntil(scheduledEventEmbeddings(env));
+    ctx.waitUntil(scheduledStoryMatching(env));
   }
 };
