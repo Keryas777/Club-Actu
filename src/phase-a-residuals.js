@@ -308,19 +308,23 @@ async function rejectObviousNonFootballReviews(db, limit = 100) {
 }
 
 async function reconcileStaleStatuses(db, limit = 100) {
+  // Start from the tiny processing-status queue before joining historical
+  // extraction/assessment tables. Without materialization SQLite may choose
+  // article_extractions as the driving table and scan ~20k rows even when
+  // only a handful of raw/phase_a_retry articles exist.
   const { results } = await db.prepare(
-    `SELECT r.id AS article_id, r.content_hash AS source_content_hash,
+    `WITH candidates AS MATERIALIZED (
+       SELECT id, content_hash, source_id, last_seen_at
+       FROM raw_articles INDEXED BY idx_raw_articles_phase_a_queue
+       WHERE processing_status IN ('raw', 'phase_a_retry')
+     )
+     SELECT r.id AS article_id, r.content_hash AS source_content_hash,
             SUM(CASE WHEN a.decision = 'relevant' THEN 1 ELSE 0 END) AS relevant,
             SUM(CASE WHEN a.decision = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
             SUM(CASE WHEN a.decision = 'rejected' THEN 1 ELSE 0 END) AS rejected,
             COUNT(DISTINCT cs.club_id) AS expected_clubs,
             COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN cs.club_id END) AS assessed_clubs
-     FROM raw_articles r
-     JOIN article_extractions e
-       ON e.article_id = r.id
-      AND e.source_content_hash = r.content_hash
-      AND e.extractor_version = ?
-      AND e.status = 'completed'
+     FROM candidates r
      JOIN club_sources cs ON cs.source_id = r.source_id
      JOIN clubs c ON c.id = cs.club_id AND c.active = 1
      LEFT JOIN article_club_assessments a
@@ -328,12 +332,19 @@ async function reconcileStaleStatuses(db, limit = 100) {
       AND a.club_id = cs.club_id
       AND a.source_content_hash = r.content_hash
       AND a.rule_version = ?
-     WHERE r.processing_status IN ('raw', 'phase_a_retry')
-     GROUP BY r.id, r.content_hash
+     WHERE EXISTS (
+       SELECT 1
+       FROM article_extractions e
+       WHERE e.article_id = r.id
+         AND e.source_content_hash = r.content_hash
+         AND e.extractor_version = ?
+         AND e.status = 'completed'
+     )
+     GROUP BY r.id, r.content_hash, r.last_seen_at
      HAVING expected_clubs = assessed_clubs
      ORDER BY r.last_seen_at ASC
      LIMIT ?`
-  ).bind(EXTRACTOR_VERSION, RULE_VERSION, limit).all();
+  ).bind(RULE_VERSION, EXTRACTOR_VERSION, limit).all();
 
   let reconciled = 0;
   for (const row of results || []) {
