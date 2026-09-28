@@ -1,0 +1,35 @@
+name: Ops D1 enrichment audit
+
+on:
+  push:
+    branches:
+      - codex/audit-d1-row-reads-2026-09-25
+    paths:
+      - .github/workflows/ops-d1-enrichment-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Measure enrichment query
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          SQL="SELECT DISTINCT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='relevant' AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT 20;"
+          echo '===== COUNTS ====='
+          npx wrangler d1 execute DB --remote --json --command "SELECT (SELECT COUNT(*) FROM raw_articles) AS raw_articles, (SELECT COUNT(*) FROM article_club_assessments) AS assessments, (SELECT COUNT(*) FROM article_content_enrichments) AS enrichments;"
+          echo '===== ENRICHMENT CANDIDATES ====='
+          npx wrangler d1 execute DB --remote --json --command "$SQL"
+          echo '===== EXPLAIN ====='
+          npx wrangler d1 execute DB --remote --json --command "EXPLAIN QUERY PLAN $SQL"
