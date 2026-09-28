@@ -20,16 +20,18 @@ jobs:
         with:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Locate Sep 27 cutoff
+      - name: Benchmark closure status
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           runq() { echo; echo "===== $1 ====="; npx wrangler d1 execute DB --remote --json --command "$2"; }
-          START='2026-09-27T00:00:00.000Z'
-          END='2026-09-28T00:00:00.000Z'
-          runq "processing_timeline" "SELECT substr(started_at,1,13) AS hour_utc, COUNT(*) AS runs, SUM(candidates) AS candidates, SUM(processed) AS processed FROM processing_runs WHERE started_at >= '$START' AND started_at < '$END' GROUP BY substr(started_at,1,13) ORDER BY hour_utc;"
-          runq "collection_timeline" "SELECT substr(started_at,1,13) AS hour_utc, COUNT(*) AS runs, SUM(articles_discovered) AS discovered, SUM(articles_inserted) AS inserted, SUM(articles_updated) AS updated, SUM(error_count) AS errors FROM collection_runs WHERE started_at >= '$START' AND started_at < '$END' GROUP BY substr(started_at,1,13) ORDER BY hour_utc;"
-          runq "last_processing" "SELECT started_at, finished_at, status, candidates, processed, failed, retry FROM processing_runs WHERE started_at >= '$START' AND started_at < '$END' ORDER BY started_at DESC LIMIT 12;"
-          runq "last_collections" "SELECT started_at, finished_at, status, articles_discovered, articles_inserted, articles_updated, error_count FROM collection_runs WHERE started_at >= '$START' AND started_at < '$END' ORDER BY started_at DESC LIMIT 12;"
+          NOW=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')
+          for CLUB in ol psg om; do
+            runq "${CLUB}_counts" "SELECT SUM(CASE WHEN a.decision='relevant' THEN 1 ELSE 0 END) AS relevant, SUM(CASE WHEN a.decision='rejected' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN a.decision='needs_review' THEN 1 ELSE 0 END) AS needs_review, SUM(CASE WHEN a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') THEN 1 ELSE 0 END) AS role_queue_pending FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id='$CLUB' AND a.rule_version='phase-a-relevance-v3';"
+            runq "${CLUB}_extraction" "SELECT COUNT(DISTINCT CASE WHEN e.status='retry' THEN r.id END) AS retry, COUNT(DISTINCT CASE WHEN e.status='failed' THEN r.id END) AS failed FROM raw_articles r JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id='$CLUB' JOIN article_extractions e ON e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' WHERE r.content_hash IS NOT NULL;"
+            runq "${CLUB}_waiting" "SELECT COUNT(DISTINCT r.id) AS n FROM raw_articles r JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id='$CLUB' WHERE r.content_hash IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1') OR EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND (e.retry_after IS NULL OR e.retry_after<='$NOW')) OR (EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') AND NOT EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.club_id='$CLUB' AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3')));"
+            runq "${CLUB}_role_errors" "SELECT COUNT(*) AS n FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id='$CLUB' AND a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') AND EXISTS (SELECT 1 FROM article_club_role_classifications rc WHERE rc.article_id=a.article_id AND rc.club_id=a.club_id AND rc.source_content_hash=a.source_content_hash AND rc.classifier_version='phase-a-role-gemini-v1' AND rc.status='error');"
+            runq "${CLUB}_review_reasons" "SELECT COALESCE(a.reason_code,'unspecified') AS reason_code, COUNT(*) AS count FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id='$CLUB' AND a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' GROUP BY COALESCE(a.reason_code,'unspecified') ORDER BY count DESC, reason_code ASC;"
+          done
