@@ -20,16 +20,31 @@ jobs:
         with:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Measure enrichment query
+      - name: Measure recurring D1 queries
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          SQL="SELECT DISTINCT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='relevant' AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT 20;"
-          echo '===== COUNTS ====='
-          npx wrangler d1 execute DB --remote --json --command "SELECT (SELECT COUNT(*) FROM raw_articles) AS raw_articles, (SELECT COUNT(*) FROM article_club_assessments) AS assessments, (SELECT COUNT(*) FROM article_content_enrichments) AS enrichments;"
-          echo '===== ENRICHMENT CANDIDATES ====='
-          npx wrangler d1 execute DB --remote --json --command "$SQL"
-          echo '===== EXPLAIN ====='
-          npx wrangler d1 execute DB --remote --json --command "EXPLAIN QUERY PLAN $SQL"
+          runq() {
+            echo
+            echo "===== $1 ====="
+            npx wrangler d1 execute DB --remote --json --command "$2"
+          }
+
+          echo '===== WORKER DEPLOYMENTS ====='
+          npx wrangler deployments list --json || true
+
+          runq "enrichment_candidates" "SELECT DISTINCT r.id, r.source_id, r.canonical_url AS url, r.content_hash AS source_content_hash FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='relevant' AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT 20;"
+
+          runq "terminalize_gone" "SELECT r.id AS article_id, r.source_id, r.content_hash AS source_content_hash, r.title, r.canonical_url AS url, e.id AS extraction_id, e.error_detail FROM article_extractions e JOIN raw_articles r ON r.id=e.article_id AND r.content_hash=e.source_content_hash WHERE e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND e.error_detail IN ('HTTP 404','HTTP 410') ORDER BY e.updated_at ASC LIMIT 50;"
+
+          runq "promote_direct_short" "SELECT a.article_id, a.club_id, a.source_content_hash, r.source_id, r.title FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id=a.club_id AND cs.relation_type='direct' WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code='insufficient_content' ORDER BY a.decided_at ASC LIMIT 50;"
+
+          runq "nonfootball_review_scan" "SELECT a.article_id, a.club_id, a.source_content_hash, a.reason_code, r.source_id, r.title, r.canonical_url AS url FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') ORDER BY a.decided_at ASC LIMIT 100;"
+
+          runq "residual_role_candidates" "SELECT a.article_id, a.club_id, a.source_content_hash, a.reason_code, a.reason_detail, r.source_id, r.title, r.canonical_url AS url, c.name AS club_name, e.normalized_title, e.normalized_excerpt, e.normalized_content FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash JOIN clubs c ON c.id=a.club_id AND c.active=1 JOIN article_extractions e ON e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed' WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') ORDER BY a.decided_at ASC LIMIT 8;"
+
+          runq "residual_queue_count" "SELECT COUNT(*) AS n FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead');"
+
+          runq "reconcile_optimized" "WITH candidates AS MATERIALIZED (SELECT id,content_hash,source_id,last_seen_at FROM raw_articles INDEXED BY idx_raw_articles_phase_a_queue WHERE processing_status IN ('raw','phase_a_retry')) SELECT r.id AS article_id, r.content_hash AS source_content_hash, SUM(CASE WHEN a.decision='relevant' THEN 1 ELSE 0 END) AS relevant, SUM(CASE WHEN a.decision='needs_review' THEN 1 ELSE 0 END) AS needs_review, SUM(CASE WHEN a.decision='rejected' THEN 1 ELSE 0 END) AS rejected, COUNT(DISTINCT cs.club_id) AS expected_clubs, COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN cs.club_id END) AS assessed_clubs FROM candidates r JOIN club_sources cs ON cs.source_id=r.source_id JOIN clubs c ON c.id=cs.club_id AND c.active=1 LEFT JOIN article_club_assessments a ON a.article_id=r.id AND a.club_id=cs.club_id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' WHERE EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') GROUP BY r.id,r.content_hash,r.last_seen_at HAVING expected_clubs=assessed_clubs ORDER BY r.last_seen_at ASC LIMIT 100;"
