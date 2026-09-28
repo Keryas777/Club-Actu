@@ -1,4 +1,4 @@
-name: Ops D1 enrichment audit
+name: Ops apply closure-status patch
 
 on:
   push:
@@ -8,35 +8,62 @@ on:
       - .github/workflows/ops-d1-enrichment-audit.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  audit:
+  patch-test:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-guard-optimize-closure-status
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Benchmark optimized closure status
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Apply staged patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          index_path = Path('src/index-phase-a-fix.js')
+          text = index_path.read_text()
+          start_marker = '    if (url.pathname === "/api/phase-a-closure-status" && request.method === "GET") {'
+          next_marker = '    if (url.pathname === "/api/repair-phase-a-residuals" && request.method === "POST") {'
+          start = text.index(start_marker)
+          end = text.index(next_marker, start)
+          route = Path('tmp/closure-route.txt').read_text().rstrip() + '\n\n'
+          index_path.write_text(text[:start] + route + text[end:])
+
+          residual_path = Path('src/phase-a-residuals.js')
+          text = residual_path.read_text()
+          marker = 'export async function getPhaseAClosureStatusFixed(db) {'
+          start = text.index(marker)
+          function_text = Path('tmp/closure-status-function.txt').read_text().rstrip() + '\n'
+          residual_path.write_text(text[:start] + function_text)
+
+          shutil.copyfile('tmp/closure-status-auth.test.js', 'test/closure-status-auth.test.js')
+          PY
+      - name: Validate
         run: |
           set -euo pipefail
-          runq() { echo; echo "===== $1 ====="; npx wrangler d1 execute DB --remote --json --command "$2"; }
-          NOW=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')
-
-          runq "group_counts" "SELECT a.club_id, SUM(CASE WHEN a.decision='relevant' THEN 1 ELSE 0 END) AS relevant, SUM(CASE WHEN a.decision='rejected' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN a.decision='needs_review' THEN 1 ELSE 0 END) AS needs_review, SUM(CASE WHEN a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') THEN 1 ELSE 0 END) AS role_queue_pending FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id IN ('ol','psg','om') AND a.rule_version='phase-a-relevance-v3' GROUP BY a.club_id;"
-
-          runq "group_extraction_retry_failed" "SELECT cs.club_id, COUNT(DISTINCT CASE WHEN e.status='retry' THEN r.id END) AS retry, COUNT(DISTINCT CASE WHEN e.status='failed' THEN r.id END) AS failed FROM article_extractions e INDEXED BY idx_article_extractions_status JOIN raw_articles r ON r.id=e.article_id AND r.content_hash=e.source_content_hash JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id IN ('ol','psg','om') WHERE e.extractor_version='phase-a-extractor-v1' AND e.status IN ('retry','failed') AND r.content_hash IS NOT NULL GROUP BY cs.club_id;"
-
-          runq "group_waiting_exact" "SELECT cs.club_id, COUNT(DISTINCT r.id) AS n FROM raw_articles r JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id IN ('ol','psg','om') WHERE r.content_hash IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1') OR EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND (e.retry_after IS NULL OR e.retry_after<='$NOW')) OR (EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') AND NOT EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.club_id=cs.club_id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3'))) GROUP BY cs.club_id;"
-
-          runq "group_waiting_queue_first" "WITH candidates AS MATERIALIZED (SELECT id, source_id, content_hash FROM raw_articles INDEXED BY idx_raw_articles_phase_a_queue WHERE content_hash IS NOT NULL AND processing_status IN ('raw','phase_a_retry')) SELECT cs.club_id, COUNT(DISTINCT r.id) AS n FROM candidates r JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id IN ('ol','psg','om') WHERE NOT EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1') OR EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND (e.retry_after IS NULL OR e.retry_after<='$NOW')) OR (EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') AND NOT EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.club_id=cs.club_id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3')) GROUP BY cs.club_id;"
-
-          runq "group_role_errors" "SELECT a.club_id, COUNT(*) AS n FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id IN ('ol','psg','om') AND a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_only','strong_alias_body_repeated','weak_alias_title','weak_alias_excerpt','weak_alias_lead') AND EXISTS (SELECT 1 FROM article_club_role_classifications rc WHERE rc.article_id=a.article_id AND rc.club_id=a.club_id AND rc.source_content_hash=a.source_content_hash AND rc.classifier_version='phase-a-role-gemini-v1' AND rc.status='error') GROUP BY a.club_id;"
-
-          runq "group_review_reasons" "SELECT a.club_id, COALESCE(a.reason_code,'unspecified') AS reason_code, COUNT(*) AS count FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.club_id IN ('ol','psg','om') AND a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' GROUP BY a.club_id, COALESCE(a.reason_code,'unspecified') ORDER BY a.club_id, count DESC, reason_code ASC;"
+          node --check src/index-phase-a-fix.js
+          node --check src/phase-a-residuals.js
+          git diff --check
+          npm test
+      - name: Commit clean patch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/workflows/ops-d1-closure-fix.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-v2.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-final.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-final2.yml || true
+          git rm -f tmp/closure-status-function.txt || true
+          git rm -f tmp/closure-route.txt || true
+          git rm -f tmp/closure-status-auth.test.js || true
+          git add src/index-phase-a-fix.js src/phase-a-residuals.js test/closure-status-auth.test.js
+          git commit -m "D1: guard and optimize closure status"
+          git push origin HEAD:codex/d1-guard-optimize-closure-status
