@@ -1,0 +1,69 @@
+name: Ops apply closure-status fix from staged files
+
+on:
+  push:
+    branches:
+      - codex/d1-guard-optimize-closure-status
+    paths:
+      - .github/workflows/ops-d1-closure-fix-final2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-guard-optimize-closure-status
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Apply staged patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          index_path = Path('src/index-phase-a-fix.js')
+          text = index_path.read_text()
+          start_marker = '    if (url.pathname === "/api/phase-a-closure-status" && request.method === "GET") {'
+          next_marker = '    if (url.pathname === "/api/repair-phase-a-residuals" && request.method === "POST") {'
+          start = text.index(start_marker)
+          end = text.index(next_marker, start)
+          route = Path('tmp/closure-route.txt').read_text().rstrip() + '\n\n'
+          index_path.write_text(text[:start] + route + text[end:])
+
+          residual_path = Path('src/phase-a-residuals.js')
+          text = residual_path.read_text()
+          marker = 'export async function getPhaseAClosureStatusFixed(db) {'
+          start = text.index(marker)
+          function = Path('tmp/closure-status-function.txt').read_text().rstrip() + '\n'
+          residual_path.write_text(text[:start] + function)
+
+          shutil.copyfile('tmp/closure-status-auth.test.js', 'test/closure-status-auth.test.js')
+          PY
+      - name: Validate
+        run: |
+          set -euo pipefail
+          node --check src/index-phase-a-fix.js
+          node --check src/phase-a-residuals.js
+          git diff --check
+          npm test
+      - name: Commit clean patch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/workflows/ops-d1-closure-fix.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-v2.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-final.yml || true
+          git rm -f .github/workflows/ops-d1-closure-fix-final2.yml || true
+          git rm -f tmp/closure-status-function.txt || true
+          git rm -f tmp/closure-route.txt || true
+          git rm -f tmp/closure-status-auth.test.js || true
+          git add src/index-phase-a-fix.js src/phase-a-residuals.js test/closure-status-auth.test.js
+          git commit -m "D1: guard and optimize closure status"
+          git push origin HEAD:codex/d1-guard-optimize-closure-status
