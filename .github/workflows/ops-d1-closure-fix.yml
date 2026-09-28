@@ -1,0 +1,302 @@
+name: Ops D1 closure-status fix
+
+on:
+  push:
+    branches:
+      - codex/d1-guard-optimize-closure-status
+    paths:
+      - .github/workflows/ops-d1-closure-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/d1-guard-optimize-closure-status
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Patch closure-status endpoint and query
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          index_path = Path('src/index-phase-a-fix.js')
+          text = index_path.read_text()
+          old = '''    if (url.pathname === "/api/phase-a-closure-status" && request.method === "GET") {
+              if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+              const result = await getPhaseAClosureStatusFixed(env.DB);
+              return json({ ok: true, ...result });
+            }'''
+          # Match independent of the indentation used in the source file.
+          old = old.replace('              ', '      ')
+          new = '''    if (url.pathname === "/api/phase-a-closure-status" && request.method === "GET") {
+              if (!env.DB) return json({ ok: false, error: "D1 binding DB missing" }, { status: 503 });
+              if (!env.MANUAL_TRIGGER_TOKEN) {
+                return json({ ok: false, error: "Manual trigger not configured" }, { status: 503 });
+              }
+              const token = bearerToken(request);
+              if (!token || token !== env.MANUAL_TRIGGER_TOKEN) {
+                return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+              }
+              const result = await getPhaseAClosureStatusFixed(env.DB);
+              return json({ ok: true, ...result });
+            }'''.replace('              ', '      ')
+          if old not in text:
+              raise SystemExit('closure-status route block not found')
+          index_path.write_text(text.replace(old, new, 1))
+
+          residual_path = Path('src/phase-a-residuals.js')
+          text = residual_path.read_text()
+          marker = 'export async function getPhaseAClosureStatusFixed(db) {'
+          start = text.find(marker)
+          if start < 0:
+              raise SystemExit('getPhaseAClosureStatusFixed marker not found')
+
+          new_func = r'''export async function getPhaseAClosureStatusFixed(db) {
+            const clubs = ["ol", "psg", "om"];
+            const byClub = {};
+            const allQueuePlaceholders = ALL_ROLE_QUEUE_REASONS.map(() => "?").join(", ");
+            const clubPlaceholders = clubs.map(() => "?").join(", ");
+            const now = new Date().toISOString();
+
+            // Closure diagnostics are read-heavy by nature, so scan each logical
+            // dataset once for all tracked clubs instead of repeating the same
+            // historical joins once per club.
+            const { results: countRows } = await db.prepare(
+              `SELECT
+                 a.club_id,
+                 SUM(CASE WHEN a.decision = 'relevant' THEN 1 ELSE 0 END) AS relevant,
+                 SUM(CASE WHEN a.decision = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                 SUM(CASE WHEN a.decision = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
+                 SUM(CASE WHEN a.decision = 'needs_review' AND a.reason_code IN (${allQueuePlaceholders}) THEN 1 ELSE 0 END) AS role_queue_pending
+               FROM article_club_assessments a
+               JOIN raw_articles r
+                 ON r.id = a.article_id
+                AND r.content_hash = a.source_content_hash
+               WHERE a.club_id IN (${clubPlaceholders})
+                 AND a.rule_version = ?
+               GROUP BY a.club_id`
+            ).bind(...ALL_ROLE_QUEUE_REASONS, ...clubs, RULE_VERSION).all();
+
+            // Retry/failed is normally an empty or tiny set. Start from the status
+            // index rather than traversing every current article/extraction row.
+            const { results: extractionRows } = await db.prepare(
+              `SELECT
+                 cs.club_id,
+                 COUNT(DISTINCT CASE WHEN e.status = 'retry' THEN r.id END) AS retry,
+                 COUNT(DISTINCT CASE WHEN e.status = 'failed' THEN r.id END) AS failed
+               FROM article_extractions e INDEXED BY idx_article_extractions_status
+               JOIN raw_articles r
+                 ON r.id = e.article_id
+                AND r.content_hash = e.source_content_hash
+               JOIN club_sources cs
+                 ON cs.source_id = r.source_id
+                AND cs.club_id IN (${clubPlaceholders})
+               WHERE e.extractor_version = ?
+                 AND e.status IN ('retry', 'failed')
+                 AND r.content_hash IS NOT NULL
+               GROUP BY cs.club_id`
+            ).bind(...clubs, EXTRACTOR_VERSION).all();
+
+            // The automatic Phase A processor can only act on raw/retry articles.
+            // Materializing that indexed queue first keeps the closure diagnostic
+            // aligned with the actionable backlog and avoids scanning all history.
+            const { results: waitingRows } = await db.prepare(
+              `WITH candidates AS MATERIALIZED (
+                 SELECT id, source_id, content_hash
+                 FROM raw_articles INDEXED BY idx_raw_articles_phase_a_queue
+                 WHERE content_hash IS NOT NULL
+                   AND processing_status IN ('raw', 'phase_a_retry')
+               )
+               SELECT cs.club_id, COUNT(DISTINCT r.id) AS n
+               FROM candidates r
+               JOIN club_sources cs
+                 ON cs.source_id = r.source_id
+                AND cs.club_id IN (${clubPlaceholders})
+               WHERE (
+                 NOT EXISTS (
+                   SELECT 1 FROM article_extractions e
+                   WHERE e.article_id = r.id
+                     AND e.source_content_hash = r.content_hash
+                     AND e.extractor_version = ?
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM article_extractions e
+                   WHERE e.article_id = r.id
+                     AND e.source_content_hash = r.content_hash
+                     AND e.extractor_version = ?
+                     AND e.status = 'retry'
+                     AND (e.retry_after IS NULL OR e.retry_after <= ?)
+                 )
+                 OR (
+                   EXISTS (
+                     SELECT 1 FROM article_extractions e
+                     WHERE e.article_id = r.id
+                       AND e.source_content_hash = r.content_hash
+                       AND e.extractor_version = ?
+                       AND e.status = 'completed'
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM article_club_assessments a
+                     WHERE a.article_id = r.id
+                       AND a.club_id = cs.club_id
+                       AND a.source_content_hash = r.content_hash
+                       AND a.rule_version = ?
+                   )
+                 )
+               )
+               GROUP BY cs.club_id`
+            ).bind(
+              ...clubs,
+              EXTRACTOR_VERSION,
+              EXTRACTOR_VERSION,
+              now,
+              EXTRACTOR_VERSION,
+              RULE_VERSION
+            ).all();
+
+            const { results: roleErrorRows } = await db.prepare(
+              `SELECT a.club_id, COUNT(*) AS n
+               FROM article_club_assessments a
+               JOIN raw_articles r
+                 ON r.id = a.article_id
+                AND r.content_hash = a.source_content_hash
+               WHERE a.club_id IN (${clubPlaceholders})
+                 AND a.rule_version = ?
+                 AND a.decision = 'needs_review'
+                 AND a.reason_code IN (${allQueuePlaceholders})
+                 AND EXISTS (
+                   SELECT 1
+                   FROM article_club_role_classifications rc
+                   WHERE rc.article_id = a.article_id
+                     AND rc.club_id = a.club_id
+                     AND rc.source_content_hash = a.source_content_hash
+                     AND rc.classifier_version = ?
+                     AND rc.status = 'error'
+                 )
+               GROUP BY a.club_id`
+            ).bind(...clubs, RULE_VERSION, ...ALL_ROLE_QUEUE_REASONS, ROLE_CLASSIFIER_VERSION).all();
+
+            const { results: reviewReasonRows } = await db.prepare(
+              `SELECT
+                 a.club_id,
+                 COALESCE(a.reason_code, 'unspecified') AS reason_code,
+                 COUNT(*) AS count
+               FROM article_club_assessments a
+               JOIN raw_articles r
+                 ON r.id = a.article_id
+                AND r.content_hash = a.source_content_hash
+               WHERE a.club_id IN (${clubPlaceholders})
+                 AND a.rule_version = ?
+                 AND a.decision = 'needs_review'
+               GROUP BY a.club_id, COALESCE(a.reason_code, 'unspecified')
+               ORDER BY a.club_id ASC, count DESC, reason_code ASC`
+            ).bind(...clubs, RULE_VERSION).all();
+
+            const countsByClub = new Map((countRows || []).map((row) => [row.club_id, row]));
+            const extractionByClub = new Map((extractionRows || []).map((row) => [row.club_id, row]));
+            const waitingByClub = new Map((waitingRows || []).map((row) => [row.club_id, row]));
+            const roleErrorsByClub = new Map((roleErrorRows || []).map((row) => [row.club_id, row]));
+            const reviewReasonsByClub = new Map();
+            for (const row of reviewReasonRows || []) {
+              if (!reviewReasonsByClub.has(row.club_id)) reviewReasonsByClub.set(row.club_id, []);
+              reviewReasonsByClub.get(row.club_id).push({
+                reason_code: row.reason_code,
+                count: Number(row.count || 0)
+              });
+            }
+
+            for (const clubId of clubs) {
+              const counts = countsByClub.get(clubId) || {};
+              const extraction = extractionByClub.get(clubId) || {};
+              const waiting = waitingByClub.get(clubId) || {};
+              const roleErrors = roleErrorsByClub.get(clubId) || {};
+              const retry = Number(extraction.retry || 0);
+              const failed = Number(extraction.failed || 0);
+              const waitingCount = Number(waiting.n || 0);
+              const roleQueuePending = Number(counts.role_queue_pending || 0);
+              const roleClassifierErrors = Number(roleErrors.n || 0);
+
+              byClub[clubId] = {
+                status: retry || failed || waitingCount || roleQueuePending || roleClassifierErrors ? "attention" : "ok",
+                relevant: Number(counts.relevant || 0),
+                rejected: Number(counts.rejected || 0),
+                needs_review: Number(counts.needs_review || 0),
+                retry,
+                failed,
+                waiting: waitingCount,
+                role_queue_pending: roleQueuePending,
+                role_classifier_errors: roleClassifierErrors,
+                review_reasons: reviewReasonsByClub.get(clubId) || []
+              };
+            }
+
+            return {
+              clubs: byClub,
+              semantics: {
+                waiting: "actionable current extraction/assessment backlog only",
+                residual_review: "low-confidence or unclear reviews may remain without blocking closure once role_queue_pending is zero"
+              }
+            };
+          }'''
+          residual_path.write_text(text[:start] + new_func + '\n')
+          PY
+
+          cat > test/closure-status-auth.test.js <<'EOF'
+          import test from "node:test";
+          import assert from "node:assert/strict";
+          import worker from "../src/index-phase-a-fix.js";
+
+          test("closure status rejects anonymous callers before touching D1", async () => {
+            const DB = {
+              prepare() {
+                throw new Error("D1 must not be queried for an unauthorized request");
+              }
+            };
+            const response = await worker.fetch(
+              new Request("https://example.test/api/phase-a-closure-status"),
+              { DB, MANUAL_TRIGGER_TOKEN: "secret" },
+              {}
+            );
+            assert.equal(response.status, 401);
+            assert.deepEqual(await response.json(), { ok: false, error: "Unauthorized" });
+          });
+
+          test("closure status fails closed when manual trigger auth is not configured", async () => {
+            const DB = {
+              prepare() {
+                throw new Error("D1 must not be queried without auth configuration");
+              }
+            };
+            const response = await worker.fetch(
+              new Request("https://example.test/api/phase-a-closure-status"),
+              { DB },
+              {}
+            );
+            assert.equal(response.status, 503);
+            assert.deepEqual(await response.json(), { ok: false, error: "Manual trigger not configured" });
+          });
+          EOF
+
+      - name: Validate
+        run: |
+          set -euo pipefail
+          node --check src/index-phase-a-fix.js
+          node --check src/phase-a-residuals.js
+          git diff --check
+          npm test
+      - name: Commit final patch and remove temporary workflow
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/ops-d1-closure-fix.yml
+          git add src/index-phase-a-fix.js src/phase-a-residuals.js test/closure-status-auth.test.js
+          git commit -m "D1: guard and optimize closure status"
+          git push origin HEAD:codex/d1-guard-optimize-closure-status
