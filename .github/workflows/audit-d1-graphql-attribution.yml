@@ -1,0 +1,332 @@
+name: Audit D1 GraphQL attribution
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/audit-d1-graphql-attribution.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: d1-graphql-attribution-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Attribute D1 rows read with GraphQL analytics
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Query Cloudflare GraphQL Analytics
+        id: graphql
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-graphql
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+          import urllib.error
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          token = os.environ.get('CLOUDFLARE_API_TOKEN', '').strip()
+          account = os.environ.get('CLOUDFLARE_ACCOUNT_ID', '').strip()
+          if not token or not account:
+              raise SystemExit('Cloudflare credentials are missing')
+
+          today = datetime.now(timezone.utc).date()
+          start = today - timedelta(days=6)
+
+          query = r'''
+          query D1Attribution($accountTag: string!, $today: Date!, $start: Date!) {
+            viewer {
+              accounts(filter: { accountTag: $accountTag }) {
+                daily: d1AnalyticsAdaptiveGroups(
+                  limit: 10000
+                  filter: { date_geq: $start, date_leq: $today }
+                ) {
+                  sum {
+                    rowsRead
+                    rowsWritten
+                    readQueries
+                    writeQueries
+                  }
+                  dimensions {
+                    date
+                    databaseId
+                  }
+                }
+                hourlyToday: d1AnalyticsAdaptiveGroups(
+                  limit: 10000
+                  filter: { date: $today }
+                ) {
+                  sum {
+                    rowsRead
+                    rowsWritten
+                    readQueries
+                    writeQueries
+                  }
+                  dimensions {
+                    datetimeHour
+                    databaseId
+                  }
+                }
+                queriesToday: d1QueriesAdaptiveGroups(
+                  limit: 10000
+                  filter: { date: $today }
+                ) {
+                  count
+                  sum {
+                    rowsRead
+                    rowsReturned
+                    rowsWritten
+                    queryDurationMs
+                  }
+                  avg {
+                    rowsRead
+                    rowsReturned
+                    rowsWritten
+                    queryDurationMs
+                  }
+                  dimensions {
+                    databaseId
+                    query
+                  }
+                }
+                queriesWeek: d1QueriesAdaptiveGroups(
+                  limit: 10000
+                  filter: { date_geq: $start, date_leq: $today }
+                ) {
+                  count
+                  sum {
+                    rowsRead
+                    rowsReturned
+                    rowsWritten
+                    queryDurationMs
+                  }
+                  avg {
+                    rowsRead
+                    rowsReturned
+                    rowsWritten
+                    queryDurationMs
+                  }
+                  dimensions {
+                    databaseId
+                    query
+                  }
+                }
+              }
+            }
+          }
+          '''
+
+          payload = json.dumps({
+              'query': query,
+              'variables': {
+                  'accountTag': account,
+                  'today': today.isoformat(),
+                  'start': start.isoformat(),
+              },
+          }).encode('utf-8')
+
+          req = urllib.request.Request(
+              'https://api.cloudflare.com/client/v4/graphql',
+              data=payload,
+              headers={
+                  'Authorization': f'Bearer {token}',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'ClubActu-D1-Audit/1.0',
+              },
+              method='POST',
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=30) as res:
+                  raw = res.read().decode('utf-8')
+                  status = res.status
+          except urllib.error.HTTPError as e:
+              raw = e.read().decode('utf-8', errors='replace')
+              status = e.code
+          except Exception as e:
+              Path('d1-graphql/error.txt').write_text(repr(e), encoding='utf-8')
+              raise
+
+          Path('d1-graphql/raw.json').write_text(raw, encoding='utf-8')
+          Path('d1-graphql/http-status.txt').write_text(str(status), encoding='utf-8')
+
+          try:
+              parsed = json.loads(raw)
+          except Exception:
+              print(raw)
+              raise SystemExit(f'GraphQL returned non-JSON HTTP {status}')
+
+          if status >= 400 or parsed.get('errors'):
+              print(json.dumps(parsed, ensure_ascii=False, indent=2))
+              raise SystemExit(f'GraphQL request failed with HTTP {status}')
+
+          accounts = (((parsed.get('data') or {}).get('viewer') or {}).get('accounts') or [])
+          if not accounts:
+              raise SystemExit('GraphQL returned no account analytics')
+
+          data = accounts[0]
+          Path('d1-graphql/data.json').write_text(
+              json.dumps(data, ensure_ascii=False, indent=2),
+              encoding='utf-8'
+          )
+          print(f"daily_groups={len(data.get('daily') or [])}")
+          print(f"hourly_groups={len(data.get('hourlyToday') or [])}")
+          print(f"today_query_groups={len(data.get('queriesToday') or [])}")
+          print(f"week_query_groups={len(data.get('queriesWeek') or [])}")
+          PY
+
+      - name: Build attribution report
+        if: always()
+        env:
+          GRAPHQL_OUTCOME: ${{ steps.graphql.outcome }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p d1-graphql
+          python3 - <<'PY' | tee d1-graphql/summary.md >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path('d1-graphql')
+
+          def n(value):
+              try:
+                  return int(round(float(value or 0)))
+              except Exception:
+                  return 0
+
+          def compact(value, width=190):
+              value = re.sub(r'\s+', ' ', str(value or '')).strip()
+              return value if len(value) <= width else value[:width-1] + '…'
+
+          def load_data():
+              p = root / 'data.json'
+              if not p.exists():
+                  return None
+              try:
+                  return json.loads(p.read_text(encoding='utf-8'))
+              except Exception:
+                  return None
+
+          print('# Club Actu — D1 GraphQL attribution')
+          print()
+          print(f"Run: **{os.environ.get('RUN_ID','?')}**")
+          print(f"GraphQL outcome: **{os.environ.get('GRAPHQL_OUTCOME','unknown')}**")
+          print()
+
+          data = load_data()
+          if not data:
+              print('## GraphQL diagnostic')
+              print()
+              raw = root / 'raw.json'
+              err = root / 'error.txt'
+              if raw.exists():
+                  print('```json')
+                  print(raw.read_text(encoding='utf-8')[-12000:])
+                  print('```')
+              elif err.exists():
+                  print('```text')
+                  print(err.read_text(encoding='utf-8')[-12000:])
+                  print('```')
+              else:
+                  print('_No GraphQL output captured._')
+              raise SystemExit(0)
+
+          daily = data.get('daily') or []
+          hourly = data.get('hourlyToday') or []
+          today_queries = data.get('queriesToday') or []
+          week_queries = data.get('queriesWeek') or []
+
+          print('## Daily D1 rows read — last 7 UTC dates')
+          print()
+          print('| UTC date | database | rows read | read queries | rows written |')
+          print('|---|---|---:|---:|---:|')
+          for row in sorted(daily, key=lambda r: (str((r.get('dimensions') or {}).get('date')), str((r.get('dimensions') or {}).get('databaseId')))):
+              d = row.get('dimensions') or {}
+              s = row.get('sum') or {}
+              print(f"| {d.get('date','')} | `{d.get('databaseId','')}` | {n(s.get('rowsRead')):,} | {n(s.get('readQueries')):,} | {n(s.get('rowsWritten')):,} |")
+
+          today_total = sum(n((row.get('sum') or {}).get('rowsRead')) for row in hourly)
+          print()
+          print(f'**Today represented by hourly analytics: {today_total:,} rows read.**')
+
+          print('\n## Today — hourly D1 rows read (UTC)\n')
+          print('| UTC hour | rows read | read queries | avg rows/read query |')
+          print('|---|---:|---:|---:|')
+          for row in sorted(hourly, key=lambda r: str((r.get('dimensions') or {}).get('datetimeHour'))):
+              d = row.get('dimensions') or {}
+              s = row.get('sum') or {}
+              reads = n(s.get('rowsRead'))
+              rq = n(s.get('readQueries'))
+              avg = reads / rq if rq else 0
+              print(f"| {d.get('datetimeHour','')} | {reads:,} | {rq:,} | {avg:,.1f} |")
+
+          def rank(rows):
+              return sorted(rows, key=lambda r: n((r.get('sum') or {}).get('rowsRead')), reverse=True)
+
+          def print_query_table(title, rows, limit=30):
+              ranked = rank(rows)
+              represented = sum(n((r.get('sum') or {}).get('rowsRead')) for r in ranked)
+              print(f'\n## {title}\n')
+              print(f'Represented query rows read: **{represented:,}**')
+              print()
+              if not ranked:
+                  print('_No query groups returned by GraphQL._')
+                  return
+              print('| # | total rows read | executions | avg rows read | rows returned | efficiency | query |')
+              print('|---:|---:|---:|---:|---:|---:|---|')
+              for i, row in enumerate(ranked[:limit], 1):
+                  s = row.get('sum') or {}
+                  a = row.get('avg') or {}
+                  dims = row.get('dimensions') or {}
+                  reads = n(s.get('rowsRead'))
+                  returned = n(s.get('rowsReturned'))
+                  eff = returned / reads if reads else 0
+                  q = compact(dims.get('query')).replace('|', '\\|').replace('`', "'")
+                  print(
+                      f"| {i} | {reads:,} | {n(row.get('count')):,} | {n(a.get('rowsRead')):,} | "
+                      f"{returned:,} | {eff:.4f} | `{q}` |"
+                  )
+
+          print_query_table('Today — query fingerprints by total rows read', today_queries)
+          print_query_table('Last 7 UTC dates — query fingerprints by total rows read', week_queries)
+          PY
+
+      - name: Publish report to diagnostic issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-graphql/summary.md
+
+      - name: Upload GraphQL diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-graphql-attribution-${{ github.run_id }}
+          path: d1-graphql/*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if GraphQL request failed
+        if: steps.graphql.outcome != 'success'
+        run: exit 1
