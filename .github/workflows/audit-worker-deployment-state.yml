@@ -1,0 +1,105 @@
+name: Audit Worker deployment state
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-worker-deployment-state.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install repository dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Inspect deployed Worker control-plane state
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set +e
+          mkdir -p worker-deployment-audit
+          {
+            echo '# wrangler deployments list'
+            npx wrangler deployments list
+            echo
+            echo '# wrangler versions list'
+            npx wrangler versions list
+          } > worker-deployment-audit/wrangler.txt 2>&1
+
+          curl --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/club-actu/versions" \
+            > worker-deployment-audit/versions.json
+
+          curl --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/club-actu/deployments" \
+            > worker-deployment-audit/deployments.json
+          exit 0
+
+      - name: Build report
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          out = pathlib.Path('worker-deployment-audit/report.md')
+          lines = ['# Club Actu — deployed Worker state', '', f'Repository HEAD used by audit: `{__import__("os").environ.get("GITHUB_SHA", "")}`', '']
+
+          for name in ('deployments','versions'):
+              path = pathlib.Path(f'worker-deployment-audit/{name}.json')
+              try:
+                  obj = json.loads(path.read_text())
+              except Exception as e:
+                  lines += [f'## Cloudflare {name}', '', f'Could not parse response: `{e}`', '']
+                  continue
+              lines += [f'## Cloudflare {name}', '']
+              lines += [f'- success: `{obj.get("success")}`']
+              if obj.get('errors'):
+                  lines += [f'- errors: `{json.dumps(obj.get("errors"), ensure_ascii=False)[:2000]}`']
+              result = obj.get('result')
+              if isinstance(result, list):
+                  lines += [f'- entries: **{len(result)}**', '']
+                  for item in result[:10]:
+                      if not isinstance(item, dict):
+                          continue
+                      keep = {k:item.get(k) for k in ('id','number','created_on','modified_on') if k in item}
+                      if 'annotations' in item: keep['annotations'] = item.get('annotations')
+                      if 'metadata' in item: keep['metadata'] = item.get('metadata')
+                      if 'versions' in item: keep['versions'] = item.get('versions')
+                      lines += ['```json', json.dumps(keep, ensure_ascii=False, indent=2)[:6000], '```', '']
+              elif isinstance(result, dict):
+                  lines += ['```json', json.dumps(result, ensure_ascii=False, indent=2)[:10000], '```', '']
+
+          text = pathlib.Path('worker-deployment-audit/wrangler.txt').read_text(errors='replace')
+          lines += ['## Wrangler', '', '```text', text[-12000:], '```', '']
+          out.write_text('\n'.join(lines))
+          PY
+          cat worker-deployment-audit/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish to D1 diagnostic issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file worker-deployment-audit/report.md
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-deployment-audit-${{ github.run_id }}
+          path: worker-deployment-audit/
+          retention-days: 14
