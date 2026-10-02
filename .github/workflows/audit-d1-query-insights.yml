@@ -1,0 +1,151 @@
+name: Audit D1 query insights
+
+on:
+  workflow_dispatch:
+    inputs:
+      time_period:
+        description: "Wrangler insights period (for example 1d or 7d)"
+        required: false
+        default: "1d"
+      limit:
+        description: "Maximum queries per ranking"
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-query-insights-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Rank D1 queries by row reads
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Validate Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN repository secret is missing."; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID repository secret is missing."; exit 1; }
+
+      - name: Fetch D1 query insights
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TIME_PERIOD: ${{ inputs.time_period || '1d' }}
+          REQUESTED_LIMIT: ${{ inputs.limit || '30' }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-insights
+
+          LIMIT="$REQUESTED_LIMIT"
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then LIMIT=30; fi
+          if [ "$LIMIT" -lt 5 ]; then LIMIT=5; fi
+          if [ "$LIMIT" -gt 100 ]; then LIMIT=100; fi
+
+          # These commands query Cloudflare D1 analytics/insights. They do not
+          # execute the listed SQL statements against the application database.
+          npx wrangler d1 insights club-actu-db \
+            --timePeriod "$TIME_PERIOD" \
+            --sort-type=sum --sort-by=reads --sort-direction=DESC \
+            --limit "$LIMIT" --json > d1-insights/total-reads.json
+
+          npx wrangler d1 insights club-actu-db \
+            --timePeriod "$TIME_PERIOD" \
+            --sort-type=avg --sort-by=reads --sort-direction=DESC \
+            --limit "$LIMIT" --json > d1-insights/avg-reads.json
+
+          npx wrangler d1 insights club-actu-db \
+            --timePeriod "$TIME_PERIOD" \
+            --sort-type=sum --sort-by=count --sort-direction=DESC \
+            --limit "$LIMIT" --json > d1-insights/frequency.json
+
+      - name: Build audit summary
+        env:
+          TIME_PERIOD: ${{ inputs.time_period || '1d' }}
+        run: |
+          python3 - <<'PY' | tee d1-insights/summary.md >> "$GITHUB_STEP_SUMMARY"
+          import json, os, re
+          from pathlib import Path
+
+          root = Path('d1-insights')
+
+          def load(name):
+              raw = json.loads((root / name).read_text(encoding='utf-8'))
+              if isinstance(raw, dict):
+                  for key in ('result', 'results', 'data'):
+                      if isinstance(raw.get(key), list):
+                          return raw[key]
+              return raw if isinstance(raw, list) else []
+
+          def compact_query(q, width=180):
+              q = re.sub(r'\s+', ' ', str(q or '')).strip()
+              return q if len(q) <= width else q[:width-1] + '…'
+
+          def num(v):
+              try:
+                  return int(v or 0)
+              except Exception:
+                  try: return round(float(v or 0), 2)
+                  except Exception: return 0
+
+          rankings = [
+              ('Top queries by TOTAL rows read', 'total-reads.json'),
+              ('Top queries by AVERAGE rows read per execution', 'avg-reads.json'),
+              ('Top queries by EXECUTION COUNT', 'frequency.json'),
+          ]
+
+          print('# Club Actu — D1 query insights')
+          print()
+          print(f"Period: **{os.environ.get('TIME_PERIOD','1d')}**")
+          print()
+          print('This report is read-only analytics. It does not replay the SQL against D1.')
+
+          for title, filename in rankings:
+              rows = load(filename)
+              print(f'\n## {title}\n')
+              print('| # | total rows read | avg rows read | executions | efficiency | query |')
+              print('|---:|---:|---:|---:|---:|---|')
+              for i, row in enumerate(rows[:30], 1):
+                  query = compact_query(row.get('query'))
+                  query = query.replace('|', '\\|')
+                  print(
+                      f"| {i} | {num(row.get('totalRowsRead')):,} | "
+                      f"{num(row.get('avgRowsRead')):,} | {num(row.get('numberOfTimesRun')):,} | "
+                      f"{row.get('queryEfficiency', '')} | `{query}` |"
+                  )
+
+          totals = load('total-reads.json')
+          known = sum(num(r.get('totalRowsRead')) for r in totals)
+          print('\n## Sum represented by returned top queries\n')
+          print(f'**{known:,} rows read** across the returned ranking entries.')
+          print('This is not necessarily the complete account total if the ranking is truncated.')
+          PY
+
+      - name: Upload raw diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-query-insights-${{ github.run_id }}
+          path: |
+            d1-insights/*.json
+            d1-insights/summary.md
+          if-no-files-found: error
+          retention-days: 14
