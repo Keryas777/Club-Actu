@@ -11,6 +11,11 @@ on:
         description: "Maximum queries per ranking"
         required: false
         default: "30"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/audit-d1-query-insights.yml"
 
 permissions:
   contents: read
