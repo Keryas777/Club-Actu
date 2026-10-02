@@ -1,0 +1,198 @@
+name: Audit D1 hot-query benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Temporary one-shot gate below: first post-reset run on 2026-10-03 only.
+    - cron: '7 0 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: audit-d1-hot-query-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Measure production hot-query row reads
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: One-shot schedule gate
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          run=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            run=true
+          elif [ "$(date -u +%F)" = "2026-10-03" ]; then
+            run=true
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "event=${{ github.event_name }} utc=$(date -u +%FT%TZ) run=$run"
+
+      - name: Checkout repository
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install repository dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Benchmark read-only hot queries
+        if: steps.gate.outputs.run == 'true'
+        id: bench
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p d1-hot-query-benchmark
+          REPORT=d1-hot-query-benchmark/report.md
+          : > "$REPORT"
+          printf '# Club Actu — D1 hot-query benchmark\n\n' >> "$REPORT"
+          printf 'Run: **%s**  \nUTC: **%s**  \n' "${{ github.run_id }}" "$(date -u +%FT%TZ)" >> "$REPORT"
+          printf 'All application probes below are read-only SELECTs. `EXPLAIN QUERY PLAN` is captured separately.\n\n' >> "$REPORT"
+
+          run_probe() {
+            local slug="$1"
+            local label="$2"
+            local sql="$3"
+            local out="d1-hot-query-benchmark/${slug}.json"
+            local err="d1-hot-query-benchmark/${slug}.err"
+            local plan="d1-hot-query-benchmark/${slug}-plan.json"
+            local planerr="d1-hot-query-benchmark/${slug}-plan.err"
+
+            printf '## %s\n\n' "$label" >> "$REPORT"
+
+            set +e
+            npx wrangler d1 execute DB --remote --json --command "EXPLAIN QUERY PLAN $sql" > "$plan" 2> "$planerr"
+            local plan_rc=$?
+            npx wrangler d1 execute DB --remote --json --command "$sql" > "$out" 2> "$err"
+            local rc=$?
+            set -e
+
+            python3 - "$out" "$err" "$plan" "$planerr" "$rc" "$plan_rc" >> "$REPORT" <<'PY'
+          import json, pathlib, sys
+          out, err, plan, planerr, rc, plan_rc = sys.argv[1:]
+          rc = int(rc); plan_rc = int(plan_rc)
+
+          def load(path):
+              try:
+                  return json.loads(pathlib.Path(path).read_text())
+              except Exception:
+                  return None
+
+          def entries(obj):
+              if obj is None:
+                  return []
+              return obj if isinstance(obj, list) else [obj]
+
+          payload = load(out)
+          total_read = 0
+          total_written = 0
+          changes = 0
+          result_rows = 0
+          for item in entries(payload):
+              if not isinstance(item, dict):
+                  continue
+              meta = item.get('meta') or {}
+              total_read += int(meta.get('rows_read') or 0)
+              total_written += int(meta.get('rows_written') or 0)
+              changes += int(meta.get('changes') or 0)
+              result_rows += len(item.get('results') or [])
+
+          print(f'- exit: **{rc}**')
+          print(f'- rows_read: **{total_read:,}**')
+          print(f'- rows_written: **{total_written:,}**')
+          print(f'- changes: **{changes:,}**')
+          print(f'- result rows: **{result_rows:,}**')
+
+          if rc != 0:
+              text = pathlib.Path(err).read_text(errors='replace')[-3000:]
+              print('\n```text')
+              print(text.strip())
+              print('```')
+
+          p = load(plan)
+          plan_rows = []
+          for item in entries(p):
+              if isinstance(item, dict):
+                  plan_rows.extend(item.get('results') or [])
+          print('\n<details><summary>EXPLAIN QUERY PLAN</summary>\n')
+          if plan_rc == 0 and plan_rows:
+              print('```text')
+              for row in plan_rows:
+                  print(row.get('detail') or row)
+              print('```')
+          else:
+              text = pathlib.Path(planerr).read_text(errors='replace')[-2000:]
+              print('```text')
+              print(text.strip() or 'No plan returned')
+              print('```')
+          print('\n</details>\n')
+          PY
+          }
+
+          NOW="strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+          TWO_HOURS_AGO="strftime('%Y-%m-%dT%H:%M:%fZ','now','-2 hours')"
+          DAY_AGO="strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')"
+          EVENT_CUTOFF="strftime('%Y-%m-%dT%H:%M:%fZ','now','-72 hours')"
+
+          # Cheap context first: tells us whether repeated reprocessing/churn is driving the bill.
+          run_probe "run-volume" "24h processing/collection volume" "SELECT (SELECT COUNT(*) FROM processing_runs WHERE started_at >= $DAY_AGO) AS phase_a_runs, (SELECT COALESCE(SUM(candidates),0) FROM processing_runs WHERE started_at >= $DAY_AGO) AS phase_a_candidates, (SELECT COALESCE(SUM(processed),0) FROM processing_runs WHERE started_at >= $DAY_AGO) AS phase_a_processed, (SELECT COUNT(*) FROM collection_runs WHERE started_at >= $DAY_AGO) AS collection_runs, (SELECT COALESCE(SUM(articles_discovered),0) FROM collection_runs WHERE started_at >= $DAY_AGO) AS discovered, (SELECT COALESCE(SUM(articles_inserted),0) FROM collection_runs WHERE started_at >= $DAY_AGO) AS inserted, (SELECT COALESCE(SUM(articles_updated),0) FROM collection_runs WHERE started_at >= $DAY_AGO) AS updated"
+
+          run_probe "phase-a-load-candidates" "Phase A — loadCandidates" "SELECT r.id FROM raw_articles r WHERE r.content_hash IS NOT NULL AND r.processing_status IN ('raw','phase_a_retry') AND (NOT EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1') OR EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND (e.retry_after IS NULL OR e.retry_after <= $NOW)) OR (EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') AND EXISTS (SELECT 1 FROM club_sources cs WHERE cs.source_id=r.source_id AND NOT EXISTS (SELECT 1 FROM article_club_assessments a WHERE a.article_id=r.id AND a.club_id=cs.club_id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3')))) ORDER BY r.last_seen_at ASC LIMIT 25"
+
+          NOISE="(e.normalized_title LIKE '%&#%' OR e.normalized_title LIKE '%&amp;%' OR e.normalized_title LIKE '%&rsquo;%' OR e.normalized_title LIKE '%&lsquo;%' OR e.normalized_title LIKE '%&rdquo;%' OR e.normalized_title LIKE '%&ldquo;%' OR e.normalized_title LIKE '%&hellip;%' OR e.normalized_title LIKE '%&ndash;%' OR e.normalized_title LIKE '%&mdash;%' OR e.normalized_title LIKE '%&eacute;%' OR e.normalized_title LIKE '%&egrave;%' OR e.normalized_title LIKE '%&agrave;%' OR e.normalized_title LIKE '%&ccedil;%' OR e.normalized_title LIKE '%The post%' OR e.normalized_title LIKE '%first appeared on But! Football Club%' OR e.normalized_title LIKE '%pour lire la suite%' OR e.normalized_title LIKE '%Ce contenu est bloqué%' OR e.normalized_title LIKE '%{''skus'':%' OR e.normalized_excerpt LIKE '%&#%' OR e.normalized_excerpt LIKE '%&amp;%' OR e.normalized_excerpt LIKE '%&rsquo;%' OR e.normalized_excerpt LIKE '%&lsquo;%' OR e.normalized_excerpt LIKE '%&rdquo;%' OR e.normalized_excerpt LIKE '%&ldquo;%' OR e.normalized_excerpt LIKE '%&hellip;%' OR e.normalized_excerpt LIKE '%&ndash;%' OR e.normalized_excerpt LIKE '%&mdash;%' OR e.normalized_excerpt LIKE '%&eacute;%' OR e.normalized_excerpt LIKE '%&egrave;%' OR e.normalized_excerpt LIKE '%&agrave;%' OR e.normalized_excerpt LIKE '%&ccedil;%' OR e.normalized_excerpt LIKE '%The post%' OR e.normalized_excerpt LIKE '%first appeared on But! Football Club%' OR e.normalized_excerpt LIKE '%pour lire la suite%' OR e.normalized_excerpt LIKE '%Ce contenu est bloqué%' OR e.normalized_excerpt LIKE '%{''skus'':%' OR e.normalized_content LIKE '%&#%' OR e.normalized_content LIKE '%&amp;%' OR e.normalized_content LIKE '%&rsquo;%' OR e.normalized_content LIKE '%&lsquo;%' OR e.normalized_content LIKE '%&rdquo;%' OR e.normalized_content LIKE '%&ldquo;%' OR e.normalized_content LIKE '%&hellip;%' OR e.normalized_content LIKE '%&ndash;%' OR e.normalized_content LIKE '%&mdash;%' OR e.normalized_content LIKE '%&eacute;%' OR e.normalized_content LIKE '%&egrave;%' OR e.normalized_content LIKE '%&agrave;%' OR e.normalized_content LIKE '%&ccedil;%' OR e.normalized_content LIKE '%The post%' OR e.normalized_content LIKE '%first appeared on But! Football Club%' OR e.normalized_content LIKE '%pour lire la suite%' OR e.normalized_content LIKE '%Ce contenu est bloqué%' OR e.normalized_content LIKE '%{''skus'':%')"
+          run_probe "cleanup-select" "Phase A text cleanup — candidate SELECT" "SELECT e.id, r.source_id FROM article_extractions e JOIN raw_articles r ON r.id=e.article_id WHERE e.status='completed' AND $NOISE AND e.updated_at >= $TWO_HOURS_AGO ORDER BY e.updated_at ASC LIMIT 25"
+          run_probe "cleanup-count" "Phase A text cleanup — remaining COUNT" "SELECT COUNT(*) AS n FROM article_extractions e WHERE e.status='completed' AND $NOISE AND e.updated_at >= $TWO_HOURS_AGO"
+
+          run_probe "role-queue" "Role classifier queue" "SELECT a.article_id,a.club_id FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash JOIN clubs c ON c.id=a.club_id AND c.active=1 JOIN article_extractions e ON e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed' WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review') ORDER BY a.decided_at ASC LIMIT 10"
+
+          run_probe "residual-terminal" "Residual maintenance — terminalize gone extractions" "SELECT r.id FROM article_extractions e JOIN raw_articles r ON r.id=e.article_id AND r.content_hash=e.source_content_hash WHERE e.extractor_version='phase-a-extractor-v1' AND e.status='retry' AND e.error_detail IN ('HTTP 404','HTTP 410') ORDER BY e.updated_at ASC LIMIT 50"
+          run_probe "residual-direct" "Residual maintenance — direct short content" "SELECT a.article_id FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash JOIN club_sources cs ON cs.source_id=r.source_id AND cs.club_id=a.club_id AND cs.relation_type='direct' WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code='insufficient_content' ORDER BY a.decided_at ASC LIMIT 50"
+          run_probe "residual-review" "Residual maintenance — obvious non-football review scan" "SELECT a.article_id,a.club_id FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_excerpt_role_review','strong_alias_lead_role_review','strong_alias_body_repeated','strong_alias_body_only','weak_alias_title','weak_alias_excerpt','weak_alias_lead') ORDER BY a.decided_at ASC LIMIT 100"
+          run_probe "residual-reconcile" "Residual maintenance — optimized stale-status reconcile" "WITH candidates AS MATERIALIZED (SELECT id,content_hash,source_id,last_seen_at FROM raw_articles INDEXED BY idx_raw_articles_phase_a_queue WHERE processing_status IN ('raw','phase_a_retry')) SELECT r.id FROM candidates r JOIN club_sources cs ON cs.source_id=r.source_id JOIN clubs c ON c.id=cs.club_id AND c.active=1 LEFT JOIN article_club_assessments a ON a.article_id=r.id AND a.club_id=cs.club_id AND a.source_content_hash=r.content_hash AND a.rule_version='phase-a-relevance-v3' WHERE EXISTS (SELECT 1 FROM article_extractions e WHERE e.article_id=r.id AND e.source_content_hash=r.content_hash AND e.extractor_version='phase-a-extractor-v1' AND e.status='completed') GROUP BY r.id,r.content_hash,r.last_seen_at HAVING COUNT(DISTINCT cs.club_id)=COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN cs.club_id END) ORDER BY r.last_seen_at ASC LIMIT 100"
+          run_probe "residual-queue-count" "Residual maintenance — role queue COUNT" "SELECT COUNT(*) AS n FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='needs_review' AND a.reason_code IN ('strong_alias_body_repeated','strong_alias_body_only','weak_alias_title','weak_alias_excerpt','weak_alias_lead')"
+
+          run_probe "event-persistence-queue" "EVENT persistence queue" "SELECT ce.article_id FROM article_content_enrichments ce INDEXED BY idx_content_enrichments_event_queue JOIN raw_articles r ON r.id=ce.article_id AND r.content_hash=ce.source_content_hash WHERE ce.status='completed' AND ce.updated_at >= $EVENT_CUTOFF AND ce.content_hash IS NOT NULL AND ce.content_text IS NOT NULL AND LENGTH(TRIM(ce.content_text))>0 AND EXISTS (SELECT 1 FROM article_club_assessments a INDEXED BY idx_article_assessments_enrichment_queue WHERE a.article_id=ce.article_id AND a.source_content_hash=ce.source_content_hash AND a.rule_version='phase-a-relevance-v3' AND a.decision='relevant') AND NOT EXISTS (SELECT 1 FROM article_event_candidate_runs q INDEXED BY idx_article_event_runs_content_gate WHERE q.article_id=ce.article_id AND q.source_content_hash=ce.source_content_hash AND q.extractor_version='phase-b-event-extractor-v0.5' AND q.input_source='article_content_enrichments' AND q.input_content_hash=ce.content_hash AND (q.status IN ('completed','failed') OR (q.status='processing' AND q.lease_expires_at IS NOT NULL AND q.lease_expires_at>CURRENT_TIMESTAMP) OR (q.status='retry' AND q.next_retry_at IS NOT NULL AND q.next_retry_at>CURRENT_TIMESTAMP))) ORDER BY ce.updated_at ASC,ce.article_id ASC LIMIT 4"
+
+          run_probe "embedding-queue" "EVENT embedding queue" "SELECT e.id AS event_id FROM event_candidates e INDEXED BY idx_event_candidates_match_queue JOIN raw_articles r ON r.id=e.article_id LEFT JOIN article_extractions x ON x.article_id=e.article_id AND x.source_content_hash=e.source_content_hash AND x.extractor_version='phase-a-extractor-v1' AND x.status='completed' WHERE e.lifecycle_status='active' AND e.match_status IN ('pending_embedding','embedding_retry','embedding_processing') AND (e.match_status='pending_embedding' OR (e.match_status='embedding_retry' AND (e.next_retry_at IS NULL OR e.next_retry_at<=CURRENT_TIMESTAMP)) OR (e.match_status='embedding_processing' AND (e.lease_expires_at IS NULL OR e.lease_expires_at<=CURRENT_TIMESTAMP))) ORDER BY e.created_at ASC,e.id ASC LIMIT 4"
+
+          run_probe "story-ready-queue" "STORY matching ready queue" "SELECT e.id AS event_id FROM event_candidates e INDEXED BY idx_event_candidates_match_queue JOIN event_embeddings emb INDEXED BY idx_event_embeddings_event_ready ON emb.event_id=e.id AND emb.status='ready' AND emb.embedding_model='@cf/baai/bge-m3' AND emb.embedding_version='story-event-embedding-v1' AND emb.dimension=1024 AND emb.encoding='float32le' AND emb.vector IS NOT NULL AND typeof(emb.vector)='blob' WHERE e.lifecycle_status='active' AND (e.match_status='ready_match' OR (e.match_status='matching_retry' AND (e.next_retry_at IS NULL OR e.next_retry_at<=CURRENT_TIMESTAMP)) OR (e.match_status='matching' AND (e.lease_expires_at IS NULL OR e.lease_expires_at<=CURRENT_TIMESTAMP))) AND emb.id=(SELECT MAX(emb2.id) FROM event_embeddings emb2 WHERE emb2.event_id=e.id AND emb2.status='ready' AND emb2.embedding_model=emb.embedding_model AND emb2.embedding_version=emb.embedding_version AND emb2.dimension=emb.dimension AND emb2.encoding=emb.encoding AND emb2.vector IS NOT NULL) ORDER BY e.created_at ASC,e.id ASC LIMIT 4"
+
+          run_probe "enrichment-candidates" "Full-content enrichment candidate SELECT" "SELECT DISTINCT r.id,r.source_id,r.canonical_url AS url,r.content_hash AS source_content_hash FROM article_club_assessments a JOIN raw_articles r ON r.id=a.article_id AND r.content_hash=a.source_content_hash LEFT JOIN article_content_enrichments ce ON ce.article_id=r.id WHERE a.rule_version='phase-a-relevance-v3' AND a.decision='relevant' AND (ce.article_id IS NULL OR ce.source_content_hash<>r.content_hash OR (ce.status='retry' AND (ce.retry_after IS NULL OR ce.retry_after<=CURRENT_TIMESTAMP))) ORDER BY COALESCE(r.published_at,r.last_seen_at) DESC LIMIT 20"
+
+          printf '\n## Interpretation rule\n\nThe production frequency multiplier is **48/day** for Worker-cron probes. The enrichment query is configured at `:15,:45`, but recent Actions history shows substantial schedule coalescing/delay; use its observed run count rather than assuming 48/day.\n' >> "$REPORT"
+
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifact
+        if: steps.gate.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-hot-query-benchmark-${{ github.run_id }}
+          path: d1-hot-query-benchmark/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish report to diagnostic issue
+        if: steps.gate.outputs.run == 'true' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ -f d1-hot-query-benchmark/report.md ]; then
+            gh issue comment 91 --repo "${{ github.repository }}" --body-file d1-hot-query-benchmark/report.md
+          fi
