@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: d1-query-insights-audit
@@ -52,13 +53,15 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID repository secret is missing."; exit 1; }
 
       - name: Fetch D1 query insights
+        id: insights
+        continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TIME_PERIOD: ${{ inputs.time_period || '1d' }}
           REQUESTED_LIMIT: ${{ inputs.limit || '30' }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p d1-insights
 
           LIMIT="$REQUESTED_LIMIT"
@@ -66,27 +69,32 @@ jobs:
           if [ "$LIMIT" -lt 5 ]; then LIMIT=5; fi
           if [ "$LIMIT" -gt 100 ]; then LIMIT=100; fi
 
+          status=0
+          run_insight() {
+            local outfile="$1"; shift
+            if ! npx wrangler d1 insights club-actu-db \
+              --timePeriod "$TIME_PERIOD" "$@" \
+              --limit "$LIMIT" --json > "d1-insights/${outfile}.json" 2> "d1-insights/${outfile}.stderr"; then
+              status=1
+            fi
+          }
+
           # These commands query Cloudflare D1 analytics/insights. They do not
           # execute the listed SQL statements against the application database.
-          npx wrangler d1 insights club-actu-db \
-            --timePeriod "$TIME_PERIOD" \
-            --sort-type=sum --sort-by=reads --sort-direction=DESC \
-            --limit "$LIMIT" --json > d1-insights/total-reads.json
+          run_insight total-reads --sort-type=sum --sort-by=reads --sort-direction=DESC
+          run_insight avg-reads --sort-type=avg --sort-by=reads --sort-direction=DESC
+          run_insight frequency --sort-type=sum --sort-by=count --sort-direction=DESC
 
-          npx wrangler d1 insights club-actu-db \
-            --timePeriod "$TIME_PERIOD" \
-            --sort-type=avg --sort-by=reads --sort-direction=DESC \
-            --limit "$LIMIT" --json > d1-insights/avg-reads.json
-
-          npx wrangler d1 insights club-actu-db \
-            --timePeriod "$TIME_PERIOD" \
-            --sort-type=sum --sort-by=count --sort-direction=DESC \
-            --limit "$LIMIT" --json > d1-insights/frequency.json
+          exit "$status"
 
       - name: Build audit summary
+        if: always()
         env:
           TIME_PERIOD: ${{ inputs.time_period || '1d' }}
+          INSIGHTS_OUTCOME: ${{ steps.insights.outcome }}
+          RUN_ID: ${{ github.run_id }}
         run: |
+          mkdir -p d1-insights
           python3 - <<'PY' | tee d1-insights/summary.md >> "$GITHUB_STEP_SUMMARY"
           import json, os, re
           from pathlib import Path
@@ -94,14 +102,20 @@ jobs:
           root = Path('d1-insights')
 
           def load(name):
-              raw = json.loads((root / name).read_text(encoding='utf-8'))
+              path = root / name
+              if not path.exists() or not path.read_text(encoding='utf-8').strip():
+                  return []
+              try:
+                  raw = json.loads(path.read_text(encoding='utf-8'))
+              except Exception:
+                  return []
               if isinstance(raw, dict):
                   for key in ('result', 'results', 'data'):
                       if isinstance(raw.get(key), list):
                           return raw[key]
               return raw if isinstance(raw, list) else []
 
-          def compact_query(q, width=180):
+          def compact_query(q, width=220):
               q = re.sub(r'\s+', ' ', str(q or '')).strip()
               return q if len(q) <= width else q[:width-1] + '…'
 
@@ -112,26 +126,31 @@ jobs:
                   try: return round(float(v or 0), 2)
                   except Exception: return 0
 
+          print('# Club Actu — D1 query insights')
+          print()
+          print(f"Run: **{os.environ.get('RUN_ID','?')}**")
+          print(f"Period: **{os.environ.get('TIME_PERIOD','1d')}**")
+          print(f"Insights command outcome: **{os.environ.get('INSIGHTS_OUTCOME','unknown')}**")
+          print()
+          print('This report is read-only analytics. It does not replay the SQL against D1.')
+
           rankings = [
               ('Top queries by TOTAL rows read', 'total-reads.json'),
               ('Top queries by AVERAGE rows read per execution', 'avg-reads.json'),
               ('Top queries by EXECUTION COUNT', 'frequency.json'),
           ]
-
-          print('# Club Actu — D1 query insights')
-          print()
-          print(f"Period: **{os.environ.get('TIME_PERIOD','1d')}**")
-          print()
-          print('This report is read-only analytics. It does not replay the SQL against D1.')
-
+          any_rows = False
           for title, filename in rankings:
               rows = load(filename)
+              any_rows = any_rows or bool(rows)
               print(f'\n## {title}\n')
+              if not rows:
+                  print('_No parsed rows returned._')
+                  continue
               print('| # | total rows read | avg rows read | executions | efficiency | query |')
               print('|---:|---:|---:|---:|---:|---|')
               for i, row in enumerate(rows[:30], 1):
-                  query = compact_query(row.get('query'))
-                  query = query.replace('|', '\\|')
+                  query = compact_query(row.get('query')).replace('|', '\\|').replace('`', "'")
                   print(
                       f"| {i} | {num(row.get('totalRowsRead')):,} | "
                       f"{num(row.get('avgRowsRead')):,} | {num(row.get('numberOfTimesRun')):,} | "
@@ -139,18 +158,47 @@ jobs:
                   )
 
           totals = load('total-reads.json')
-          known = sum(num(r.get('totalRowsRead')) for r in totals)
-          print('\n## Sum represented by returned top queries\n')
-          print(f'**{known:,} rows read** across the returned ranking entries.')
-          print('This is not necessarily the complete account total if the ranking is truncated.')
+          if totals:
+              known = sum(num(r.get('totalRowsRead')) for r in totals)
+              print('\n## Sum represented by returned top queries\n')
+              print(f'**{known:,} rows read** across the returned ranking entries.')
+              print('This is not necessarily the complete account total if the ranking is truncated.')
+
+          if not any_rows:
+              print('\n## Wrangler diagnostics\n')
+              for stem in ('total-reads', 'avg-reads', 'frequency'):
+                  err = root / f'{stem}.stderr'
+                  out = root / f'{stem}.json'
+                  print(f'### {stem}')
+                  if err.exists() and err.read_text(encoding='utf-8').strip():
+                      print('```text')
+                      print(err.read_text(encoding='utf-8')[-4000:])
+                      print('```')
+                  elif out.exists():
+                      print('```text')
+                      print(out.read_text(encoding='utf-8')[-4000:])
+                      print('```')
+                  else:
+                      print('_No output file._')
           PY
 
+      - name: Publish report to diagnostic issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-insights/summary.md
+
       - name: Upload raw diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: d1-query-insights-${{ github.run_id }}
           path: |
-            d1-insights/*.json
-            d1-insights/summary.md
-          if-no-files-found: error
+            d1-insights/*
+          if-no-files-found: warn
           retention-days: 14
+
+      - name: Fail if insights command failed
+        if: steps.insights.outcome != 'success'
+        run: exit 1
