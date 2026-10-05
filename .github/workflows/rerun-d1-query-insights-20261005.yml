@@ -1,0 +1,85 @@
+name: Rerun D1 query insights 2026-10-05
+
+on:
+  push:
+    branches:
+      - ops/rerun-d1-query-insights-20261005
+    paths:
+      - ".github/workflows/rerun-d1-query-insights-20261005.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  insights:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch top D1 queries by rows read
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-insights
+          npx --yes wrangler@4 d1 insights club-actu-db \
+            --time-period 1d \
+            --sort-type=sum \
+            --sort-by=reads \
+            --sort-direction=DESC \
+            --limit 100 \
+            --json > d1-insights/total.json
+          npx --yes wrangler@4 d1 insights club-actu-db \
+            --time-period 1d \
+            --sort-type=avg \
+            --sort-by=reads \
+            --sort-direction=DESC \
+            --limit 100 \
+            --json > d1-insights/avg.json
+      - name: Build report
+        run: |
+          python3 - <<'PY' | tee d1-insights/report.md >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, re
+          def load(name):
+              p=pathlib.Path('d1-insights')/name
+              raw=json.loads(p.read_text()) if p.exists() and p.read_text().strip() else []
+              if isinstance(raw,dict):
+                  for k in ('result','results','data'):
+                      if isinstance(raw.get(k),list): return raw[k]
+              return raw if isinstance(raw,list) else []
+          def num(v):
+              try: return int(v or 0)
+              except Exception:
+                  try: return int(float(v or 0))
+                  except Exception: return 0
+          def q(v): return re.sub(r'\s+',' ',str(v or '')).strip().replace('|','\\|').replace('`',"'")
+          rows=load('total.json')
+          print('# D1 query attribution rerun — 2026-10-05')
+          print()
+          print(f'Fingerprints returned: **{len(rows)}**')
+          print()
+          if rows:
+              print('| # | total rows read | avg rows read | runs | query |')
+              print('|---:|---:|---:|---:|---|')
+              for i,r in enumerate(rows[:30],1):
+                  text=q(r.get('query'))
+                  if len(text)>260: text=text[:259]+'…'
+                  print(f"| {i} | {num(r.get('totalRowsRead')):,} | {num(r.get('avgRowsRead')):,} | {num(r.get('numberOfTimesRun')):,} | `{text}` |")
+          else:
+              print('Wrangler returned no query insight rows even though the D1 dashboard currently shows query fingerprints and ~4.9M rows read in the rolling 24h view.')
+          PY
+      - name: Comment diagnostic issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-insights/report.md
+      - name: Upload raw result
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-query-insights-rerun-${{ github.run_id }}
+          path: d1-insights/**
+          retention-days: 7
