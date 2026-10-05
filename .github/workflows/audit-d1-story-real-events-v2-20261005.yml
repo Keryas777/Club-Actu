@@ -1,0 +1,169 @@
+name: Audit D1 STORY real events v2 2026-10-05
+
+on:
+  push:
+    branches:
+      - ops/d1-story-fanout-audit-20261005
+    paths:
+      - ".github/workflows/audit-d1-story-real-events-v2-20261005.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch recent real EVENTs and shortlist context
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-story-real-v2
+          SQL="SELECT e.id,e.article_id,e.language,e.family,e.stage,e.primary_people_json,e.primary_clubs_json,e.relation_from,e.relation_to,e.competition,e.opponents_json,e.lexical_tokens_json,e.match_status,e.updated_at,COALESCE((SELECT json_array_length(a.candidates_json) FROM story_match_attempts a WHERE a.event_id=e.id ORDER BY a.id DESC LIMIT 1),0) AS historical_candidate_count FROM event_candidates e WHERE e.lifecycle_status='active' AND e.match_status IN ('auto_new_story','auto_attach','ambiguous_ai') ORDER BY historical_candidate_count DESC,e.updated_at DESC,e.id DESC LIMIT 12"
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "$SQL" > d1-story-real-v2/events.json
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "SELECT language,event_count,max_df,context_version FROM story_shortlist_contexts ORDER BY language" > d1-story-real-v2/contexts.json
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "SELECT language,token,document_count FROM story_shortlist_token_df ORDER BY language,token" > d1-story-real-v2/token-df.json
+
+      - name: Replay production candidate lookup on real EVENTs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cat > /tmp/story-real-v2.mjs <<'NODE'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { buildStoryCandidateLookupKeys } from './src/story-matching-core.js';
+
+          const root = 'd1-story-real-v2';
+          const rowsFrom = (path) => {
+            const raw = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const xs = Array.isArray(raw) ? raw : [raw];
+            return xs.flatMap((x) => x?.results || []);
+          };
+          const events = rowsFrom(`${root}/events.json`);
+          const contexts = new Map(rowsFrom(`${root}/contexts.json`).map((r) => [String(r.language || 'und'), r]));
+          const df = new Map();
+          for (const r of rowsFrom(`${root}/token-df.json`)) {
+            df.set(`${String(r.language || 'und')}\u0000${String(r.token || '')}`, Number(r.document_count || 0));
+          }
+          const parseArray = (value) => {
+            try { const v = JSON.parse(value || '[]'); return Array.isArray(v) ? v : []; }
+            catch { return []; }
+          };
+          const quoteSql = (s) => `'${String(s).replaceAll("'", "''")}'`;
+          const summary = [];
+          let cumulativeReads = 0;
+          const READ_BUDGET = 650000;
+
+          for (const event of events.slice(0, 8)) {
+            if (cumulativeReads >= READ_BUDGET) break;
+            const lang = String(event.language || 'und');
+            const ctx = contexts.get(lang) || { max_df: 3 };
+            const maxDf = Number(ctx.max_df || 3);
+            const lexical = parseArray(event.lexical_tokens_json).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
+            const discriminant = new Set(lexical.filter((token) => Number(df.get(`${lang}\u0000${token}`) || 0) <= maxDf));
+            const keys = buildStoryCandidateLookupKeys(event, discriminant);
+            const keyJson = JSON.stringify(keys.map(({ key_type, key_value }) => ({ key_type, key_value })));
+            const sql = `
+              WITH event_keys AS (
+                SELECT json_extract(value, '$.key_type') AS key_type,
+                       json_extract(value, '$.key_value') AS key_value
+                FROM json_each(${quoteSql(keyJson)})
+              )
+              SELECT s.id, s.founder_event_id, s.family, s.status, s.boundary_event_id,
+                     s.first_event_at, s.last_event_at, s.member_count,
+                     s.centroid_model, s.centroid_embedding_version, s.centroid_dimension,
+                     s.centroid_encoding, s.centroid_member_count, s.centroid_revision,
+                     COUNT(*) AS matched_key_count
+              FROM event_keys q
+              JOIN story_index_keys AS k INDEXED BY idx_story_index_keys_lookup
+                ON k.key_type = q.key_type AND k.key_value = q.key_value
+              JOIN stories s ON s.id = k.story_id
+              WHERE s.status = 'active' AND s.merged_into_story_id IS NULL
+              GROUP BY s.id
+              ORDER BY matched_key_count DESC,
+                       COALESCE(s.last_event_at, s.created_at) DESC,
+                       s.id ASC
+              LIMIT 64
+            `;
+            let stdout = '';
+            try {
+              stdout = execFileSync('npx', ['--yes','wrangler@4','d1','execute','DB','--remote','--json','--command',sql], {
+                encoding: 'utf8', maxBuffer: 20 * 1024 * 1024,
+                env: process.env,
+                stdio: ['ignore','pipe','pipe']
+              });
+            } catch (error) {
+              console.error('Replay failed for event', event.id);
+              console.error('stderr:', error?.stderr?.toString?.() || '');
+              console.error('stdout:', error?.stdout?.toString?.() || '');
+              console.error('keys:', keyJson);
+              process.exit(1);
+            }
+            const payload = JSON.parse(stdout);
+            const xs = Array.isArray(payload) ? payload : [payload];
+            const resultRows = xs.flatMap((x) => x?.results || []);
+            const reads = xs.reduce((n, x) => n + Number(x?.meta?.rows_read || 0), 0);
+            cumulativeReads += reads;
+            summary.push({
+              event_id: event.id,
+              updated_at: event.updated_at,
+              match_status: event.match_status,
+              family: event.family,
+              historical_candidate_count: Number(event.historical_candidate_count || 0),
+              current_max_df: maxDf,
+              lexical_count: lexical.length,
+              discriminant_count: discriminant.size,
+              lookup_key_count: keys.length,
+              replay_candidate_count: resultRows.length,
+              rows_read: reads,
+              cumulative_rows_read: cumulativeReads
+            });
+          }
+          fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2));
+          NODE
+          node /tmp/story-real-v2.mjs
+
+      - name: Report
+        run: |
+          python3 - <<'PY' | tee d1-story-real-v2/report.md >> "$GITHUB_STEP_SUMMARY"
+          import json
+          rows=json.load(open('d1-story-real-v2/summary.json'))
+          print('# STORY real-event lookup benchmark v2 — 2026-10-05')
+          print()
+          print('Read-only. Uses the production `buildStoryCandidateLookupKeys()` function and current DF/max_df filtering. The diagnostic stops before cumulative candidate-query reads exceed ~650k.')
+          print()
+          print('| event | status | family | hist candidates | discrim tokens | lookup keys | replay candidates | rows_read |')
+          print('|---|---|---|---:|---:|---:|---:|---:|')
+          for r in rows:
+              print(f"| `{str(r['event_id'])[:12]}…` | {r['match_status']} | {r['family']} | {r['historical_candidate_count']} | {r['discriminant_count']} | {r['lookup_key_count']} | {r['replay_candidate_count']} | {r['rows_read']:,} |")
+          vals=[int(r['rows_read']) for r in rows]
+          print()
+          if vals:
+              sv=sorted(vals)
+              print(f'- events replayed: **{len(vals)}**')
+              print(f'- min: **{min(vals):,}**')
+              print(f'- median: **{sv[len(sv)//2]:,}**')
+              print(f'- max: **{max(vals):,}**')
+              print(f'- cumulative diagnostic candidate reads: **{sum(vals):,}**')
+          PY
+
+      - name: Comment investigation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-story-real-v2/report.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d1-story-real-v2-${{ github.run_id }}
+          path: d1-story-real-v2/**
+          retention-days: 7
