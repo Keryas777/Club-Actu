@@ -167,11 +167,21 @@ export async function loadStoryCandidates(db, event, ctx, metrics) {
   const keys = buildStoryCandidateLookupKeys(event, ctx.discriminantTokens);
   if (!keys.length) return { candidates: [], lookup_keys: [] };
   const rows = await queryAll(db, `
-    WITH event_keys AS (
+    WITH event_keys AS MATERIALIZED (
       SELECT
         json_extract(value, '$.key_type') AS key_type,
         json_extract(value, '$.key_value') AS key_value
       FROM json_each(?)
+    ),
+    matched AS MATERIALIZED (
+      SELECT
+        k.story_id,
+        COUNT(*) AS matched_key_count
+      FROM event_keys q
+      CROSS JOIN story_index_keys AS k INDEXED BY idx_story_index_keys_lookup
+        ON k.key_type = q.key_type
+       AND k.key_value = q.key_value
+      GROUP BY k.story_id
     )
     SELECT
       s.id,
@@ -189,16 +199,12 @@ export async function loadStoryCandidates(db, event, ctx, metrics) {
       s.centroid_encoding,
       s.centroid_member_count,
       s.centroid_revision,
-      COUNT(*) AS matched_key_count
-    FROM event_keys q
-    JOIN story_index_keys AS k INDEXED BY idx_story_index_keys_lookup
-      ON k.key_type = q.key_type
-     AND k.key_value = q.key_value
-    JOIN stories s ON s.id = k.story_id
+      m.matched_key_count
+    FROM matched m
+    JOIN stories s ON s.id = m.story_id
     WHERE s.status = 'active'
       AND s.merged_into_story_id IS NULL
-    GROUP BY s.id
-    ORDER BY matched_key_count DESC, COALESCE(s.last_event_at, s.created_at) DESC, s.id ASC
+    ORDER BY m.matched_key_count DESC, COALESCE(s.last_event_at, s.created_at) DESC, s.id ASC
     LIMIT ?
   `, [JSON.stringify(keys), MAX_STORY_CANDIDATES], metrics);
   return { candidates: rows, lookup_keys: keys };
