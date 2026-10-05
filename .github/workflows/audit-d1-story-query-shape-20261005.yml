@@ -1,0 +1,97 @@
+name: Audit D1 STORY query shape 2026-10-05
+
+on:
+  push:
+    branches:
+      - ops/d1-story-fanout-audit-20261005
+    paths:
+      - ".github/workflows/audit-d1-story-query-shape-20261005.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch one high-candidate real EVENT and context
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-story-shape
+          SQL="SELECT e.id,e.article_id,e.language,e.family,e.stage,e.primary_people_json,e.primary_clubs_json,e.relation_from,e.relation_to,e.competition,e.opponents_json,e.lexical_tokens_json FROM event_candidates e WHERE e.lifecycle_status='active' AND e.match_status IN ('auto_new_story','auto_attach','ambiguous_ai') AND EXISTS (SELECT 1 FROM story_match_attempts a WHERE a.event_id=e.id AND json_array_length(a.candidates_json)>=16) ORDER BY e.updated_at DESC LIMIT 1"
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "$SQL" > d1-story-shape/event.json
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "SELECT language,event_count,max_df FROM story_shortlist_contexts" > d1-story-shape/contexts.json
+          npx --yes wrangler@4 d1 execute DB --remote --json --command "SELECT language,token,document_count FROM story_shortlist_token_df" > d1-story-shape/token-df.json
+      - name: Compare current and pre-aggregated equivalent query
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cat > story-shape.mjs <<'NODE'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { buildStoryCandidateLookupKeys } from './src/story-matching-core.js';
+          const rowsFrom=(p)=>{const r=JSON.parse(fs.readFileSync(p,'utf8'));return (Array.isArray(r)?r:[r]).flatMap(x=>x?.results||[])};
+          const event=rowsFrom('d1-story-shape/event.json')[0];
+          if(!event) throw new Error('No event selected');
+          const contexts=new Map(rowsFrom('d1-story-shape/contexts.json').map(r=>[String(r.language||'und'),r]));
+          const df=new Map(rowsFrom('d1-story-shape/token-df.json').map(r=>[`${String(r.language||'und')}\u0000${String(r.token||'')}`,Number(r.document_count||0)]));
+          const parse=(v)=>{try{const x=JSON.parse(v||'[]');return Array.isArray(x)?x:[]}catch{return[]}};
+          const lang=String(event.language||'und'); const maxDf=Number(contexts.get(lang)?.max_df||3);
+          const lexical=parse(event.lexical_tokens_json).map(x=>String(x||'').trim().toLowerCase()).filter(Boolean);
+          const discriminant=new Set(lexical.filter(t=>Number(df.get(`${lang}\u0000${t}`)||0)<=maxDf));
+          const keys=buildStoryCandidateLookupKeys(event,discriminant).map(({key_type,key_value})=>({key_type,key_value}));
+          const q=(s)=>`'${String(s).replaceAll("'","''")}'`; const kj=q(JSON.stringify(keys));
+          const cols=`s.id,s.founder_event_id,s.family,s.status,s.boundary_event_id,s.first_event_at,s.last_event_at,s.member_count,s.centroid_model,s.centroid_embedding_version,s.centroid_dimension,s.centroid_encoding,s.centroid_member_count,s.centroid_revision`;
+          const current=`WITH event_keys AS (SELECT json_extract(value,'$.key_type') AS key_type,json_extract(value,'$.key_value') AS key_value FROM json_each(${kj})) SELECT ${cols},COUNT(*) AS matched_key_count FROM event_keys q JOIN story_index_keys AS k INDEXED BY idx_story_index_keys_lookup ON k.key_type=q.key_type AND k.key_value=q.key_value JOIN stories s ON s.id=k.story_id WHERE s.status='active' AND s.merged_into_story_id IS NULL GROUP BY s.id ORDER BY matched_key_count DESC,COALESCE(s.last_event_at,s.created_at) DESC,s.id ASC LIMIT 16`;
+          const optimized=`WITH event_keys AS MATERIALIZED (SELECT json_extract(value,'$.key_type') AS key_type,json_extract(value,'$.key_value') AS key_value FROM json_each(${kj})), matched AS MATERIALIZED (SELECT k.story_id,COUNT(*) AS matched_key_count FROM event_keys q CROSS JOIN story_index_keys AS k INDEXED BY idx_story_index_keys_lookup ON k.key_type=q.key_type AND k.key_value=q.key_value GROUP BY k.story_id) SELECT ${cols},m.matched_key_count FROM matched m JOIN stories s ON s.id=m.story_id WHERE s.status='active' AND s.merged_into_story_id IS NULL ORDER BY m.matched_key_count DESC,COALESCE(s.last_event_at,s.created_at) DESC,s.id ASC LIMIT 16`;
+          function run(sql){const out=execFileSync('npx',['--yes','wrangler@4','d1','execute','DB','--remote','--json','--command',sql],{encoding:'utf8',env:process.env,maxBuffer:20*1024*1024});const xs=JSON.parse(out);const arr=Array.isArray(xs)?xs:[xs];return {rows:arr.flatMap(x=>x?.results||[]),reads:arr.reduce((n,x)=>n+Number(x?.meta?.rows_read||0),0)}}
+          function explain(sql){return run('EXPLAIN QUERY PLAN '+sql)}
+          const a=run(current), b=run(optimized), ea=explain(current), eb=explain(optimized);
+          const ids=(x)=>x.rows.map(r=>r.id);
+          const result={event_id:event.id,max_df:maxDf,lookup_keys:keys.length,current_rows_read:a.reads,optimized_rows_read:b.reads,current_ids:ids(a),optimized_ids:ids(b),same_ids:JSON.stringify(ids(a))===JSON.stringify(ids(b)),current_plan:ea.rows,optimized_plan:eb.rows};
+          fs.writeFileSync('d1-story-shape/result.json',JSON.stringify(result,null,2));
+          NODE
+          node story-shape.mjs
+      - name: Report
+        run: |
+          python3 - <<'PY' | tee d1-story-shape/report.md >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r=json.load(open('d1-story-shape/result.json'))
+          a=int(r['current_rows_read']); b=int(r['optimized_rows_read'])
+          print('# STORY equivalent query-shape benchmark — 2026-10-05')
+          print()
+          print(f"- EVENT: `{r['event_id']}`")
+          print(f"- lookup keys: **{r['lookup_keys']}**")
+          print(f"- current query: **{a:,} rows_read**")
+          print(f"- pre-aggregated/materialized query: **{b:,} rows_read**")
+          print(f"- reduction: **{(a/b if b else 0):.1f}×**" if b else '- reduction: n/a')
+          print(f"- exact ordered candidate IDs preserved: **{r['same_ids']}**")
+          print()
+          print('## Current plan')
+          print('```json')
+          print(json.dumps(r['current_plan'],indent=2,ensure_ascii=False))
+          print('```')
+          print('## Optimized plan')
+          print('```json')
+          print(json.dumps(r['optimized_plan'],indent=2,ensure_ascii=False))
+          print('```')
+          PY
+      - name: Comment investigation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-story-shape/report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d1-story-query-shape-${{ github.run_id }}
+          path: d1-story-shape/**
+          retention-days: 7
