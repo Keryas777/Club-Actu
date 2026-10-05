@@ -1,0 +1,131 @@
+name: Audit D1 STORY fanout 2026-10-05
+
+on:
+  push:
+    branches:
+      - ops/d1-story-fanout-audit-20261005
+    paths:
+      - ".github/workflows/audit-d1-story-fanout-20261005.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run bounded D1 diagnostics
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p d1-story-fanout
+
+          runq() {
+            local name="$1"
+            local sql="$2"
+            npx --yes wrangler@4 d1 execute DB --remote --json --command "$sql" > "d1-story-fanout/${name}.json"
+          }
+
+          runq sizes "SELECT (SELECT MAX(rowid) FROM story_index_keys) AS story_index_max_rowid, (SELECT MAX(rowid) FROM story_event_index_keys) AS story_event_index_max_rowid, (SELECT MAX(rowid) FROM stories) AS stories_max_rowid, (SELECT MAX(rowid) FROM story_events) AS story_events_max_rowid, (SELECT MAX(rowid) FROM event_candidates) AS events_max_rowid"
+          runq statuses "SELECT match_status, COUNT(*) AS n FROM event_candidates GROUP BY match_status ORDER BY n DESC"
+
+          STORY_EVENT_MAX=$(python3 - <<'PY'
+          import json
+          d=json.load(open('d1-story-fanout/sizes.json'))
+          rows=[]
+          for x in d if isinstance(d,list) else [d]: rows += (x or {}).get('results') or []
+          print(int((rows[0] if rows else {}).get('story_event_index_max_rowid') or 0))
+          PY
+          )
+          STORY_MAX=$(python3 - <<'PY'
+          import json
+          d=json.load(open('d1-story-fanout/sizes.json'))
+          rows=[]
+          for x in d if isinstance(d,list) else [d]: rows += (x or {}).get('results') or []
+          print(int((rows[0] if rows else {}).get('story_index_max_rowid') or 0))
+          PY
+          )
+
+          # Only scan the key tables when their approximate row count is safely bounded.
+          if [ "$STORY_EVENT_MAX" -le 250000 ]; then
+            runq event_key_fanout "SELECT key_type, key_value, COUNT(*) AS fanout FROM story_event_index_keys GROUP BY key_type, key_value ORDER BY fanout DESC, key_type, key_value LIMIT 40"
+          fi
+          if [ "$STORY_MAX" -le 250000 ]; then
+            runq story_key_fanout "SELECT key_type, key_value, COUNT(*) AS fanout FROM story_index_keys GROUP BY key_type, key_value ORDER BY fanout DESC, key_type, key_value LIMIT 40"
+          fi
+
+      - name: Build report
+        run: |
+          python3 - <<'PY' | tee d1-story-fanout/report.md >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          root=pathlib.Path('d1-story-fanout')
+          def load(name):
+              p=root/f'{name}.json'
+              if not p.exists(): return [], 0
+              raw=json.loads(p.read_text())
+              items=raw if isinstance(raw,list) else [raw]
+              rows=[]; reads=0
+              for x in items:
+                  if not isinstance(x,dict): continue
+                  rows.extend(x.get('results') or [])
+                  reads += int((x.get('meta') or {}).get('rows_read') or 0)
+              return rows, reads
+          sizes, sizes_reads=load('sizes')
+          statuses, statuses_reads=load('statuses')
+          ef, ef_reads=load('event_key_fanout')
+          sf, sf_reads=load('story_key_fanout')
+          s=sizes[0] if sizes else {}
+          print('# D1 STORY fan-out audit — 2026-10-05')
+          print()
+          print('Read-only diagnostic. Fan-out scans are skipped automatically above 250k approximate rows.')
+          print()
+          print('## Approximate table cardinalities (MAX(rowid))')
+          print()
+          for k in ['story_index_max_rowid','story_event_index_max_rowid','stories_max_rowid','story_events_max_rowid','events_max_rowid']:
+              print(f'- {k}: **{int(s.get(k) or 0):,}**')
+          print(f'- diagnostic rows_read (sizes): **{sizes_reads:,}**')
+          print()
+          print('## EVENT match statuses')
+          print()
+          for r in statuses: print(f"- `{r.get('match_status')}`: **{int(r.get('n') or 0):,}**")
+          print(f'- diagnostic rows_read (statuses): **{statuses_reads:,}**')
+          print()
+          def table(title, rows, reads):
+              print(f'## {title}')
+              print()
+              if not rows:
+                  print('Skipped or no rows returned.')
+                  print()
+                  return
+              print('| key_type | key_value | fanout |')
+              print('|---|---|---:|')
+              for r in rows[:40]:
+                  v=str(r.get('key_value') or '').replace('|','\\|')
+                  print(f"| {r.get('key_type')} | `{v}` | {int(r.get('fanout') or 0):,} |")
+              print()
+              print(f'Diagnostic query rows_read: **{reads:,}**')
+              print()
+          table('Top story_event_index_keys fan-out',ef,ef_reads)
+          table('Top story_index_keys fan-out',sf,sf_reads)
+          PY
+
+      - name: Comment D1 investigation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 91 --repo "$GITHUB_REPOSITORY" --body-file d1-story-fanout/report.md
+
+      - name: Upload raw diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-story-fanout-${{ github.run_id }}
+          path: d1-story-fanout/**
+          retention-days: 7
