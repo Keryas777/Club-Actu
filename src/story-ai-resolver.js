@@ -1,6 +1,6 @@
 import { clampInteger, cleanError } from './story-matching-core.js';
 
-export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v5';
+export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v6';
 export const DEFAULT_STORY_AI_PROVIDER = 'workers_ai';
 export const DEFAULT_STORY_AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const DEFAULT_STORY_AI_LIMIT = 1;
@@ -146,6 +146,8 @@ export function buildStoryAiPrompt(input) {
         'Attach only when the new EVENT is clearly another update or report about the SAME CENTRAL DOSSIER, not merely something related to it. ' +
         'Ask: would an editor reasonably keep both EVENTs inside one evolving article/dossier without changing its central subject? If the answer is no, choose new_story. ' +
         'ATTACH is the exceptional answer: require affirmative evidence that both EVENTs describe the same concrete episode, transaction, injury, decision or evolving dossier. If the evidence proves only that the subjects are related, choose new_story. ' +
+        'Before choosing attach, state internally the exact shared concrete episode using facts present on BOTH sides. If the bridge can only be phrased as same match, same club, same coach, same crisis, same competition, same transfer window or same player, that is not enough: choose new_story. ' +
+        'Candidate order and deterministic scores are hints, NOT recommendations. Inspect every supplied candidate. A lower-ranked candidate that directly documents the same concrete episode is better than a higher-scoring candidate linked only by context. ' +
         'Shared names are weak evidence: the same coach, player, club, competition, national team, date, or fixture can appear in several distinct STORYs. ' +
         'Different central people, transactions, decisions, injuries, disciplinary cases, supporter incidents or controversies are distinct subjects unless the supplied evidence clearly shows they are updates of one dossier. ' +
         'A fixture is CONTEXT, not STORY identity. Match result/analysis/direct reaction may form a match-level STORY, but player availability, one player injury, one selection choice, one tactical choice, one press quote or one transfer angle before that fixture is a separate dossier unless both EVENTs concern the same concrete personnel/tactical issue. ' +
@@ -153,7 +155,8 @@ export function buildStoryAiPrompt(input) {
         'For transfers: two different targets/transactions are DIFFERENT STORYs even when the same club, sporting director or coach is involved. The same player is also insufficient when one EVENT is about a transfer and the other is about match performance, a reunion quote or another unrelated episode. ' +
         'For a repeated person: same person does not mean same dossier. Injury history versus international playing time, or transfer future versus a pre-match quote, are DIFFERENT STORYs. ' +
         'Calibration negatives from real audits: Todibo unavailable for Lens-OL vs Niakhaté injured for Lens-OL = DIFFERENT; Bidstrup knee concerns vs Bidstrup international-break minutes = DIFFERENT; Openda reunion/quote before Lens-OL vs OL negotiating his permanent transfer = DIFFERENT; an OM Bakola/Højbjerg transfer consequence vs an OM Da Cunha transfer failure merely sharing Benatia = DIFFERENT; Egan-Riley injury vs Højbjerg injury merely sharing OM/Genesio = DIFFERENT. ' +
-        'Calibration positives: two reports of De Ketelaere confirming the same PSG contact = SAME; two updates on the same Ferran Torres ankle problem = SAME; Niakhaté being ruled out and the resulting Fonseca defensive reshuffle for that absence = SAME. ' +
+        'Additional hard negatives from production audit: a betting/pronostic/cotes preview of Lens-OL vs a distinct OL player-return, injury or availability update before Lens-OL = DIFFERENT even though the fixture is identical; Maupay publicly supporting Genesio during an OM crisis vs a Lorenzi recruitment plan or a youth-policy dispute involving Genesio = DIFFERENT even though the club, coach and crisis are shared. ' +
+        'Calibration positives: two reports of De Ketelaere confirming the same PSG contact = SAME; two updates on the same Ferran Torres ankle problem = SAME; Niakhaté being ruled out and the resulting Fonseca defensive reshuffle for that absence = SAME; Maupay accepting responsibility for his missed chances after OM-PSG and another direct post-match report about those same missed chances and reaction = SAME even if that matching candidate has a lower deterministic score. ' +
         'Concrete negative example: “Zidane may call Tolisso to France” and “Zidane plans a role for Cherki” are DIFFERENT STORYs despite sharing Zidane and an OL context. ' +
         'A supporter-banner, crowd, security or disciplinary incident that merely occurs during a fixture is NOT automatically the match STORY; choose new_story when the incident itself is the central subject. ' +
         'Choose new_story when it is a distinct subject. Choose unsure whenever the supplied evidence is insufficient or genuinely balanced. Never choose a story_id that is not supplied. ' +
