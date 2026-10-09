@@ -47,6 +47,10 @@ test('prompt treats supplied text as evidence and keeps the task bounded', () =>
   assert.match(messages[0].content, /supporter-banner.*NOT automatically the match STORY/);
   assert.match(messages[0].content, /ATTACH is the exceptional answer/);
   assert.match(messages[0].content, /A fixture is CONTEXT, not STORY identity/);
+  assert.match(messages[0].content, /Candidate order and deterministic scores are hints, NOT recommendations/);
+  assert.match(messages[0].content, /betting\/pronostic\/cotes preview of Lens-OL.*player-return, injury or availability update.*DIFFERENT/);
+  assert.match(messages[0].content, /Maupay publicly supporting Genesio.*Lorenzi recruitment plan.*DIFFERENT/);
+  assert.match(messages[0].content, /missed chances after OM-PSG.*lower deterministic score/);
   assert.match(messages[0].content, /Todibo unavailable for Lens-OL vs Niakhaté injured for Lens-OL = DIFFERENT/);
   assert.match(messages[0].content, /Bidstrup knee concerns vs Bidstrup international-break minutes = DIFFERENT/);
   assert.match(messages[0].content, /Openda reunion\/quote before Lens-OL vs OL negotiating his permanent transfer = DIFFERENT/);
@@ -56,8 +60,8 @@ test('prompt treats supplied text as evidence and keeps the task bounded', () =>
   assert.deepEqual(payload.candidates.map((row) => row.story_id), ['story-a']);
 });
 
-test('prompt version records the V5 central-subject policy', () => {
-  assert.equal(STORY_AI_PROMPT_VERSION, 'story-ai-ambiguity-v5');
+test('prompt version records the V6 evidence-identity policy', () => {
+  assert.equal(STORY_AI_PROMPT_VERSION, 'story-ai-ambiguity-v6');
 });
 
 test('parser accepts an attach only to an allowed candidate and cited evidence', () => {
