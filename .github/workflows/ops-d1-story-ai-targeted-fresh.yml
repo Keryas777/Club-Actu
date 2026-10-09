@@ -1,4 +1,4 @@
-name: Ops D1.2 V5 real shadow cohort
+name: Ops D1.2 V5 candidate audit
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  cohort:
+  audit:
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -20,179 +20,53 @@ jobs:
         with:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
-
-      - name: Run 20 current ambiguities through deployed shadow resolver
-        env:
-          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
-          BASE_URL: https://club-actu.deliriousfan7.workers.dev
-        run: |
-          set -euo pipefail
-          : > final-review-ids.txt
-          : > cohort-summary.txt
-          pairs='
-          1471:4a23495c1cee361e58ed59d37654d4582edd9ab6bc612dbd0dcf1564bd03a619
-          1462:81f611a1a0cff88a434c371041edad43d0bc84d6fd0acc50e8a102b265afa2e5
-          1461:47e71d7a2655c55044efaa3ea5bc5368add120e03997c04e6cdf49caad52b1f4
-          1460:a7207f377d0ea4f4cf45fefd5c345b0bc22908aefa91a1d8321676f51f2ad9c8
-          1458:41875e1d3b982957d5f708d82ac9300b6d83f4efc77079434051c7cde55292d1
-          1456:0ca5730fd23285d4142eb13390f4187b5be2be4b5b3a035d35d6953f754db7cd
-          1455:c075bf0edfe6de888ae258fff26224e92c5aa62781e75df35862776483b81241
-          1454:a7788eadb4b09acbfe8d6b3e06ca0cf5e5fe9045706fb4b25e644e7e5abb069b
-          1452:8598f1e9c24354b4d5bbcaf7e26aca804bacd8c8e9ec33cac4364e299eb399d4
-          1451:f6db236a6a5d677e88a11033dd7f93ea5b7400b2abde600430a7508a46207024
-          1450:a1314bb6800298eaddc043a29950d3a346a3e0d717b1e715cf803638ece6dedb
-          1448:ec54425e2ba0760d82bd94cdc05b8f2138d6dae7332673f11fbdac7496b97715
-          1445:d61396baedf30370c90498667f199c760870641ea18688e6bbc977b808e3c45d
-          1444:5e849dfc3df0e154386ab1118aab7ee5b5c99193025ce07235531979c59f86d8
-          1443:d671cfc55e8eff7d325e64194d179702469970a192c5c999ef413a1b84aaab9e
-          1442:042a2047f49790d8b326be6eee5f593321d7b132607541544074faa77481f913
-          1441:d9d2daf4dae48c96f06bdd685fc29e6ed7777a23f110b7126709abf87ed9cdf7
-          1440:fc9237dd9bcfef0efebdbca9ce39293c18ab4066ff1fac55110d1259e1ad1e3d
-          1439:bbfcbd516d321d59195f525e12e34dfc8deaac6b38a57d5d0a56c7a7e0dc9a30
-          1438:ac0d5de2da898826b18ac221ec2c3984e2aa8c59eb752221bb1c1f1c553dd74a
-          '
-          for pair in $pairs; do
-            attempt="${pair%%:*}"
-            event="${pair#*:}"
-            echo "=== ORIGINAL $attempt $event ==="
-
-            curl --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$attempt" > "ai-orig-$attempt.json"
-
-            python3 - "$attempt" <<'PY'
-          import json,sys
-          a=sys.argv[1]
-          d=json.load(open(f'ai-orig-{a}.json',encoding='utf-8'))
-          e=(d.get('decisions') or [{}])[0]
-          print(f"original={a} outcome={e.get('outcome')} decision={e.get('decision')} confidence={e.get('confidence')} story={e.get('story_id')} reason={e.get('reason')} rationale={e.get('rationale')}")
-          PY
-
-            outcome="$(python3 - "$attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'ai-orig-{sys.argv[1]}.json',encoding='utf-8'))
-          print((d.get('decisions') or [{}])[0].get('outcome') or '')
-          PY
-          )"
-
-            if [ "$outcome" = "review_pending" ]; then
-              echo "$attempt" >> final-review-ids.txt
-              echo "$attempt:$event:direct" >> cohort-summary.txt
-              continue
-            fi
-
-            if [ "$outcome" != "stale" ]; then
-              echo "$attempt:$event:$outcome" >> cohort-summary.txt
-              continue
-            fi
-
-            # Stale snapshot: deterministic rematch, then inspect the newly terminal matcher attempt.
-            curl --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "match-$attempt.json"
-            curl --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "lookup-$attempt.json"
-
-            read -r match_status fresh_attempt < <(python3 - "$attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'lookup-{sys.argv[1]}.json',encoding='utf-8'))
-          e=(d.get('examples') or [{}])[0]
-          print(e.get('match_status') or '', e.get('match_attempt_id') or '')
-          PY
-          )
-            echo "rematch original=$attempt status=$match_status fresh_attempt=$fresh_attempt"
-
-            if [ "$match_status" != "ambiguous_ai" ] || [ -z "$fresh_attempt" ]; then
-              echo "$attempt:$event:rematch_$match_status" >> cohort-summary.txt
-              continue
-            fi
-
-            curl --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$fresh_attempt" > "ai-fresh-$fresh_attempt.json"
-            python3 - "$fresh_attempt" <<'PY'
-          import json,sys
-          a=sys.argv[1]
-          d=json.load(open(f'ai-fresh-{a}.json',encoding='utf-8'))
-          e=(d.get('decisions') or [{}])[0]
-          print(f"fresh={a} outcome={e.get('outcome')} decision={e.get('decision')} confidence={e.get('confidence')} story={e.get('story_id')} rationale={e.get('rationale')}")
-          PY
-            fresh_outcome="$(python3 - "$fresh_attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'ai-fresh-{sys.argv[1]}.json',encoding='utf-8'))
-          print((d.get('decisions') or [{}])[0].get('outcome') or '')
-          PY
-          )"
-            if [ "$fresh_outcome" = "review_pending" ]; then
-              echo "$fresh_attempt" >> final-review-ids.txt
-              echo "$fresh_attempt:$event:fresh" >> cohort-summary.txt
-            else
-              echo "$fresh_attempt:$event:$fresh_outcome" >> cohort-summary.txt
-            fi
-          done
-
-          echo '=== FINAL REVIEW IDS ==='
-          cat final-review-ids.txt || true
-          echo '=== COHORT SUMMARY ==='
-          cat cohort-summary.txt
-
-      - name: Audit V5 decisions, prompt version, cited evidence and mutation barrier
+      - name: Audit V5 candidate snapshots and representative members
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          ids="$(paste -sd, final-review-ids.txt || true)"
-          echo "AUDIT_IDS=$ids"
-          test -n "$ids" || { echo "No review_pending V5 decisions in cohort"; exit 0; }
-
-          echo '=== V5 REVIEW RESULTS ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.best_story_id,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,e.relation_from,e.relation_to,e.competition,e.opponents_json,r.source_id,r.title,substr(e.evidence_json,1,2200) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
-
-          echo '=== V5 CITED EVIDENCE ==='
+          ids='1471,1443,1533,1534,1535,1536,1537,1539,1540,1541,1542,1543,1544,1545,1547,1548,1549'
+          echo '=== V5 CANDIDATE MEMBERS ==='
           npx wrangler d1 execute DB --remote --command "
-          WITH aa AS (
-            SELECT id attempt_id,event_id,candidates_json,ai_response_json
-            FROM story_match_attempts WHERE id IN ($ids) AND ai_status='review_pending'
+          WITH attempts AS (
+            SELECT id attempt_id,event_id,ai_response_json,candidates_json
+            FROM story_match_attempts
+            WHERE id IN ($ids)
           ),
-          chosen AS (
-            SELECT aa.attempt_id,
-                   json_extract(aa.ai_response_json,'$.story_id') ai_story_id,
-                   json_extract(c.value,'$.hybrid') chosen_hybrid,
-                   json_extract(c.value,'$.embedding') chosen_embedding,
-                   json_extract(c.value,'$.lexical') chosen_lexical,
-                   json_extract(c.value,'$.temporal') chosen_temporal
-            FROM aa LEFT JOIN json_each(aa.candidates_json) c
-              ON json_extract(c.value,'$.story_id')=json_extract(aa.ai_response_json,'$.story_id')
+          cand AS (
+            SELECT attempts.attempt_id,attempts.event_id,
+                   CAST(c.key AS INTEGER) candidate_rank,
+                   json_extract(c.value,'$.story_id') story_id,
+                   json_extract(c.value,'$.shortlist_pass') shortlist_pass,
+                   json_extract(c.value,'$.family_compatible') family_compatible,
+                   json_extract(c.value,'$.hybrid') hybrid,
+                   json_extract(c.value,'$.embedding') embedding,
+                   json_extract(c.value,'$.lexical') lexical,
+                   json_extract(c.value,'$.temporal') temporal,
+                   c.value candidate_json,
+                   json_extract(attempts.ai_response_json,'$.decision') ai_decision,
+                   json_extract(attempts.ai_response_json,'$.story_id') ai_story_id
+            FROM attempts,json_each(attempts.candidates_json) c
+            WHERE CAST(c.key AS INTEGER)<4
           ),
-          ev AS (
-            SELECT aa.attempt_id,aa.event_id incoming_event_id,
-                   json_extract(aa.ai_response_json,'$.decision') ai_decision,
-                   json_extract(aa.ai_response_json,'$.story_id') ai_story_id,
-                   json_extract(aa.ai_response_json,'$.confidence') confidence,
-                   json_extract(aa.ai_response_json,'$.rationale') rationale,
-                   j.value cited_event_id
-            FROM aa,json_each(json_extract(aa.ai_response_json,'$.evidence_event_ids')) j
+          members AS (
+            SELECT cand.*,
+                   CAST(m.key AS INTEGER) member_rank,
+                   json_extract(m.value,'$.event_id') member_event_id
+            FROM cand
+            LEFT JOIN json_each(json_extract(cand.candidate_json,'$.shortlist_members')) m
+              ON CAST(m.key AS INTEGER)<3
           )
-          SELECT ev.attempt_id,ev.incoming_event_id,ev.ai_decision,ev.ai_story_id,ev.confidence,ev.rationale,
-                 chosen.chosen_hybrid,chosen.chosen_embedding,chosen.chosen_lexical,chosen.chosen_temporal,
-                 ev.cited_event_id,
-                 CASE WHEN ev.cited_event_id=ev.incoming_event_id THEN 'incoming' ELSE 'representative' END evidence_role,
-                 e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,
-                 r.source_id,r.title,substr(e.evidence_json,1,2200) evidence
-          FROM ev LEFT JOIN chosen ON chosen.attempt_id=ev.attempt_id
-          LEFT JOIN event_candidates e ON e.id=ev.cited_event_id
+          SELECT members.attempt_id,members.ai_decision,members.ai_story_id,
+                 members.candidate_rank,members.story_id,members.shortlist_pass,members.family_compatible,
+                 members.hybrid,members.embedding,members.lexical,members.temporal,
+                 members.member_rank,members.member_event_id,
+                 e.family member_family,e.stage member_stage,e.primary_people_json member_people,
+                 e.primary_clubs_json member_clubs,e.relation_from member_from,e.relation_to member_to,
+                 r.source_id member_source,r.title member_title,
+                 substr(e.evidence_json,1,2200) member_evidence
+          FROM members
+          LEFT JOIN event_candidates e ON e.id=members.member_event_id
           LEFT JOIN raw_articles r ON r.id=e.article_id
-          ORDER BY ev.attempt_id DESC,evidence_role,ev.cited_event_id;"
-
-          echo '=== V5 MEMBERSHIP BARRIER ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,a.ai_status,a.ai_prompt_version,se.story_id,se.assignment_kind FROM story_match_attempts a LEFT JOIN story_events se ON se.event_id=a.event_id AND se.membership_status='active' WHERE a.id IN ($ids) ORDER BY a.id DESC;"
+          ORDER BY members.attempt_id DESC,members.candidate_rank,members.member_rank;"
