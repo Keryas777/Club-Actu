@@ -45,9 +45,19 @@ test('prompt treats supplied text as evidence and keeps the task bounded', () =>
   assert.match(messages[0].content, /SAME CENTRAL DOSSIER/);
   assert.match(messages[0].content, /Zidane may call Tolisso.*Zidane plans a role for Cherki/);
   assert.match(messages[0].content, /supporter-banner.*NOT automatically the match STORY/);
-  assert.match(messages[0].content, /line-ups, the result, match analysis and direct post-match reactions/);
+  assert.match(messages[0].content, /ATTACH is the exceptional answer/);
+  assert.match(messages[0].content, /A fixture is CONTEXT, not STORY identity/);
+  assert.match(messages[0].content, /Todibo unavailable for Lens-OL vs Niakhaté injured for Lens-OL = DIFFERENT/);
+  assert.match(messages[0].content, /Bidstrup knee concerns vs Bidstrup international-break minutes = DIFFERENT/);
+  assert.match(messages[0].content, /Openda reunion\/quote before Lens-OL vs OL negotiating his permanent transfer = DIFFERENT/);
+  assert.match(messages[0].content, /two reports of De Ketelaere confirming the same PSG contact = SAME/);
+  assert.match(messages[0].content, /two updates on the same Ferran Torres ankle problem = SAME/);
   const payload = JSON.parse(messages[1].content);
   assert.deepEqual(payload.candidates.map((row) => row.story_id), ['story-a']);
+});
+
+test('prompt version records the V5 central-subject policy', () => {
+  assert.equal(STORY_AI_PROMPT_VERSION, 'story-ai-ambiguity-v5');
 });
 
 test('parser accepts an attach only to an allowed candidate and cited evidence', () => {
