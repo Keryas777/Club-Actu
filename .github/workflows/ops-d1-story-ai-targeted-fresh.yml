@@ -1,4 +1,4 @@
-name: Ops D1.2 V6 real shadow cohort
+name: Ops D1.2 Cherki candidate root-cause audit
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  cohort:
+  audit:
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -21,167 +21,47 @@ jobs:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Run 20 new ambiguities through deployed V6 shadow resolver
-        env:
-          MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
-          BASE_URL: https://club-actu.deliriousfan7.workers.dev
-        run: |
-          set -euo pipefail
-          : > final-review-ids.txt
-          : > cohort-summary.txt
-          pairs='
-          1437:73b658dc4bec3cd867cd9576d7c2f908ef68240885a85625dfa919766a1a7c83
-          1436:cf3953796cd3f009c42d85049222acef63094ccf633c60e5565c244517dfa527
-          1435:33feb29d25c08dfeb7001566950e86cdbebe4d8622a6f50cff0b9ace09fb6a8f
-          1432:e31b9d2887c72c0dc08d1533fe7d7bf5081cfe60a12ed223154a15b7717c4702
-          1425:cba125811a49be61976e94b0b87c0fe91144946157c2fdcc9d92aa254d05a089
-          1424:59899bcc9f78cb6bff8b491a94dcacacfc2a8d184e201656a147c9f51cc0105c
-          1423:76a8e4447ef1bde7120503b2d5416021bbb92d87ffa5981da1c99a103d593879
-          1422:81aef80d1dec196224bd7797fb185361e6ebc60cf99f4d56704cdaf1274cb82d
-          1421:3a85a30899f41c165b47d6b6e5af8d91c03c36956c2066c8e06a21c646fe5a64
-          1420:8d1aca185e762c29bb39da5c672fb6ab20796a474f9b58ccf854b12adbd44479
-          1411:aed13ad8b7c1f3113daa9b017b6d6839160a0085253b700a4b7352b5e79c5f4b
-          1410:d533e9785395daae9251d4f48ec48b4858ff1d7e480cb5886ac27235482aed2f
-          1409:0ff32a6ee9f8a83acf12ff8d4a1edc47e8c3dc7b6c9c6e9524cd332a83578b00
-          1408:c0622c204f9a4af25fc17d839970717e5236f04558a1b300f44543a4a0df1a98
-          1407:f9dcc4dd4ff22bc048485bcf3d12497e5f3a6fb5bda3c07d3a649a8d58352f69
-          1403:b5b5056b1b7cc0cefa0a6e40a82bc65cbc7e346647da7457f79e75d534b18b9f
-          1402:15628c0851303e5b2009b8a15b21d6e681e1373bd022f37a3f3564adc4f975b8
-          1401:1410b4e765b46421978bfbfde7393b58372bb428ae227f13f6dfcbdf97c16451
-          1398:0572baea3d038a38d23ba8d3f8c241e4b8f8ea180ff3a09c01d90cab23ef744b
-          1392:8ef9b41adfbb853f9083bb406aee6d69ac838520ad287a868a60c6cd2f603bae
-          '
-          for pair in $pairs; do
-            attempt="${pair%%:*}"
-            event="${pair#*:}"
-            echo "=== ORIGINAL $attempt $event ==="
-
-            curl --max-time 30 --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$attempt" > "ai-orig-$attempt.json"
-
-            outcome="$(python3 - "$attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'ai-orig-{sys.argv[1]}.json',encoding='utf-8'))
-          e=(d.get('decisions') or [{}])[0]
-          print(e.get('outcome') or '')
-          print(f"original={sys.argv[1]} outcome={e.get('outcome')} decision={e.get('decision')} confidence={e.get('confidence')} story={e.get('story_id')} rationale={e.get('rationale')}", file=sys.stderr)
-          PY
-          )"
-
-            if [ "$outcome" = "review_pending" ]; then
-              echo "$attempt" >> final-review-ids.txt
-              echo "$attempt:$event:direct" >> cohort-summary.txt
-              continue
-            fi
-            if [ "$outcome" != "stale" ]; then
-              echo "$attempt:$event:$outcome" >> cohort-summary.txt
-              continue
-            fi
-
-            curl --max-time 30 --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "match-$attempt.json"
-            curl --max-time 30 --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "lookup-$attempt.json"
-
-            read -r match_status fresh_attempt < <(python3 - "$attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'lookup-{sys.argv[1]}.json',encoding='utf-8'))
-          e=(d.get('examples') or [{}])[0]
-          print(e.get('match_status') or '', e.get('match_attempt_id') or '')
-          PY
-          )
-            echo "rematch original=$attempt status=$match_status fresh_attempt=$fresh_attempt"
-
-            if [ "$match_status" != "ambiguous_ai" ] || [ -z "$fresh_attempt" ]; then
-              echo "$attempt:$event:rematch_$match_status" >> cohort-summary.txt
-              continue
-            fi
-
-            curl --max-time 30 --silent --show-error --fail \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$fresh_attempt" > "ai-fresh-$fresh_attempt.json"
-
-            fresh_outcome="$(python3 - "$fresh_attempt" <<'PY'
-          import json,sys
-          d=json.load(open(f'ai-fresh-{sys.argv[1]}.json',encoding='utf-8'))
-          e=(d.get('decisions') or [{}])[0]
-          print(e.get('outcome') or '')
-          print(f"fresh={sys.argv[1]} outcome={e.get('outcome')} decision={e.get('decision')} confidence={e.get('confidence')} story={e.get('story_id')} rationale={e.get('rationale')}", file=sys.stderr)
-          PY
-          )"
-            if [ "$fresh_outcome" = "review_pending" ]; then
-              echo "$fresh_attempt" >> final-review-ids.txt
-              echo "$fresh_attempt:$event:fresh" >> cohort-summary.txt
-            else
-              echo "$fresh_attempt:$event:$fresh_outcome" >> cohort-summary.txt
-            fi
-          done
-
-          echo '=== FINAL REVIEW IDS ==='
-          cat final-review-ids.txt || true
-          echo '=== COHORT SUMMARY ==='
-          cat cohort-summary.txt
-
-      - name: Audit V6 decisions, candidates, evidence and shadow barrier
+      - name: Inspect Cherki duplicate EVENTs and missing STORY candidate
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          ids="$(paste -sd, final-review-ids.txt || true)"
-          echo "AUDIT_IDS=$ids"
-          test -n "$ids" || { echo "No review_pending V6 decisions in cohort"; exit 0; }
-
-          echo '=== V6 REVIEW RESULTS ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.best_story_id,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,a.candidates_json,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,e.relation_from,e.relation_to,e.competition,e.opponents_json,r.source_id,r.title,substr(e.evidence_json,1,2400) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
-
-          echo '=== V6 CANDIDATE MEMBERS ==='
+          echo '=== CHERKI SAME-ARTICLE EVENTS ==='
           npx wrangler d1 execute DB --remote --command "
-          WITH aa AS (
-            SELECT id attempt_id,event_id,ai_response_json,candidates_json
-            FROM story_match_attempts WHERE id IN ($ids)
-          ),
-          cand AS (
-            SELECT aa.attempt_id,CAST(c.key AS INTEGER) candidate_rank,
-                   json_extract(c.value,'$.story_id') story_id,
-                   json_extract(c.value,'$.shortlist_pass') shortlist_pass,
-                   json_extract(c.value,'$.family_compatible') family_compatible,
-                   json_extract(c.value,'$.hybrid') hybrid,
-                   json_extract(c.value,'$.embedding') embedding,
-                   json_extract(c.value,'$.lexical') lexical,
-                   json_extract(c.value,'$.temporal') temporal,
-                   c.value candidate_json,
-                   json_extract(aa.ai_response_json,'$.decision') ai_decision,
-                   json_extract(aa.ai_response_json,'$.story_id') ai_story_id
-            FROM aa,json_each(aa.candidates_json) c WHERE CAST(c.key AS INTEGER)<4
-          ),
-          members AS (
-            SELECT cand.*,CAST(m.key AS INTEGER) member_rank,
-                   json_extract(m.value,'$.event_id') member_event_id
-            FROM cand LEFT JOIN json_each(json_extract(cand.candidate_json,'$.shortlist_members')) m
-              ON CAST(m.key AS INTEGER)<3
+          SELECT e.id event_id,e.article_id,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,
+                 e.relation_from,e.relation_to,e.competition,e.opponents_json,e.lexical_tokens_json,
+                 r.source_id,r.title,substr(e.evidence_json,1,2600) evidence
+          FROM event_candidates e
+          JOIN raw_articles r ON r.id=e.article_id
+          WHERE e.id IN (
+            '81aef80d1dec196224bd7797fb185361e6ebc60cf99f4d56704cdaf1274cb82d',
+            '3a85a30899f41c165b47d6b6e5af8d91c03c36956c2066c8e06a21c646fe5a64'
           )
-          SELECT members.attempt_id,members.ai_decision,members.ai_story_id,
-                 members.candidate_rank,members.story_id,members.shortlist_pass,members.family_compatible,
-                 members.hybrid,members.embedding,members.lexical,members.temporal,
-                 members.member_rank,members.member_event_id,
-                 e.family member_family,e.stage member_stage,e.primary_people_json member_people,
-                 e.primary_clubs_json member_clubs,r.source_id member_source,r.title member_title,
-                 substr(e.evidence_json,1,2000) member_evidence
-          FROM members LEFT JOIN event_candidates e ON e.id=members.member_event_id
-          LEFT JOIN raw_articles r ON r.id=e.article_id
-          ORDER BY members.attempt_id DESC,members.candidate_rank,members.member_rank;"
+          ORDER BY e.id;"
 
-          echo '=== V6 MEMBERSHIP BARRIER ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,a.ai_status,a.ai_prompt_version,se.story_id,se.assignment_kind FROM story_match_attempts a LEFT JOIN story_events se ON se.event_id=a.event_id AND se.membership_status='active' WHERE a.id IN ($ids) ORDER BY a.id DESC;"
+          echo '=== CORRECT CHERKI STORY MEMBERS ==='
+          npx wrangler d1 execute DB --remote --command "
+          SELECT se.story_id,se.event_id,se.assignment_kind,e.article_id,e.family,e.stage,
+                 e.primary_people_json people,e.primary_clubs_json clubs,
+                 e.relation_from,e.relation_to,e.competition,e.opponents_json,e.lexical_tokens_json,
+                 r.source_id,r.title,substr(e.evidence_json,1,2200) evidence
+          FROM story_events se
+          JOIN event_candidates e ON e.id=se.event_id
+          JOIN raw_articles r ON r.id=e.article_id
+          WHERE se.story_id='ec8454ec664e9786a4ae1897eae087535dec1fb514b2cfe132627344f3b02f50'
+            AND se.membership_status='active'
+          ORDER BY se.assigned_at,se.event_id;"
+
+          echo '=== CORRECT CHERKI STORY INDEX KEYS ==='
+          npx wrangler d1 execute DB --remote --command "
+          SELECT key_type,key_value
+          FROM story_index_keys
+          WHERE story_id='ec8454ec664e9786a4ae1897eae087535dec1fb514b2cfe132627344f3b02f50'
+          ORDER BY key_type,key_value;"
+
+          echo '=== ATTEMPT 1557 CANDIDATES ==='
+          npx wrangler d1 execute DB --remote --command "
+          SELECT id,event_id,best_story_id,best_hybrid_score,substr(candidates_json,1,16000) candidates_json
+          FROM story_match_attempts
+          WHERE id=1557;"
