@@ -26,7 +26,7 @@ jobs:
           BASE_URL: https://club-actu.deliriousfan7.workers.dev
         run: |
           set -euo pipefail
-          ids='96 94 93 92 91 90 88 87 86 84 83 82'
+          ids='1509 1507 1502 1501 1496 1494 1492 1491 1490 1486 1485 1484 1483 1481 1478 1477 1475 1474 1473 1469'
           for id in $ids; do
             status="$(curl --silent --show-error --output "ai-$id.json" --write-out '%{http_code}' \
               --request POST \
@@ -37,16 +37,18 @@ jobs:
             cat "ai-$id.json"; echo
             if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then exit 20; fi
           done
-      - name: Audit decisions and chosen STORY evidence
+      - name: Audit decisions and evidence
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          ids='96,94,93,92,91,90,88,87,86,84,83,82'
+          ids='1509,1507,1502,1501,1496,1494,1492,1491,1490,1486,1485,1484,1483,1481,1478,1477,1475,1474,1473,1469'
           echo '=== TARGETED RESULTS ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,e.family,e.primary_people_json people,e.primary_clubs_json clubs,r.source_id,r.title,substr(e.evidence_json,1,1500) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
-          echo '=== CHOSEN/BEST STORY CONTEXT FOR SUCCESSFUL REVIEWS ==='
-          npx wrangler d1 execute DB --remote --command "WITH reviewed AS (SELECT a.id attempt_id,a.event_id,a.best_story_id,json_extract(a.ai_response_json,'$.decision') ai_decision,json_extract(a.ai_response_json,'$.story_id') ai_story_id,json_extract(a.ai_response_json,'$.confidence') confidence,json_extract(a.ai_response_json,'$.evidence_event_ids') evidence_ids FROM story_match_attempts a WHERE a.id IN ($ids) AND a.ai_status='review_pending'), contexts AS (SELECT reviewed.*,COALESCE(reviewed.ai_story_id,reviewed.best_story_id) context_story_id,se.event_id member_event_id,m.family member_family,m.primary_people_json member_people,m.primary_clubs_json member_clubs,mr.source_id member_source,mr.title member_title,substr(m.evidence_json,1,1500) member_evidence,ROW_NUMBER() OVER (PARTITION BY reviewed.attempt_id ORDER BY se.assigned_at,se.event_id) rn FROM reviewed LEFT JOIN story_events se ON se.story_id=COALESCE(reviewed.ai_story_id,reviewed.best_story_id) AND se.membership_status='active' LEFT JOIN event_candidates m ON m.id=se.event_id LEFT JOIN raw_articles mr ON mr.id=m.article_id) SELECT * FROM contexts WHERE rn<=4 ORDER BY attempt_id,rn;"
+          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.best_story_id,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,e.relation_from,e.relation_to,e.competition,e.opponents_json,r.source_id,r.title,substr(e.evidence_json,1,2200) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
+          echo '=== CANDIDATE SNAPSHOTS ==='
+          npx wrangler d1 execute DB --remote --command "SELECT id attempt_id,event_id,best_story_id,substr(candidates_json,1,12000) candidates_json FROM story_match_attempts WHERE id IN ($ids) ORDER BY id DESC;"
+          echo '=== CHOSEN/BEST STORY CONTEXT ==='
+          npx wrangler d1 execute DB --remote --command "WITH reviewed AS (SELECT a.id attempt_id,a.event_id,a.best_story_id,json_extract(a.ai_response_json,'$.decision') ai_decision,json_extract(a.ai_response_json,'$.story_id') ai_story_id,json_extract(a.ai_response_json,'$.confidence') confidence,json_extract(a.ai_response_json,'$.evidence_event_ids') evidence_ids FROM story_match_attempts a WHERE a.id IN ($ids) AND a.ai_status='review_pending'), contexts AS (SELECT reviewed.*,COALESCE(reviewed.ai_story_id,reviewed.best_story_id) context_story_id,se.event_id member_event_id,m.family member_family,m.stage member_stage,m.primary_people_json member_people,m.primary_clubs_json member_clubs,m.relation_from member_from,m.relation_to member_to,m.competition member_competition,m.opponents_json member_opponents,mr.source_id member_source,mr.title member_title,substr(m.evidence_json,1,2200) member_evidence,ROW_NUMBER() OVER (PARTITION BY reviewed.attempt_id ORDER BY CASE WHEN instr(COALESCE(reviewed.evidence_ids,''),se.event_id)>0 THEN 0 ELSE 1 END,se.assigned_at DESC,se.event_id) rn FROM reviewed LEFT JOIN story_events se ON se.story_id=COALESCE(reviewed.ai_story_id,reviewed.best_story_id) AND se.membership_status='active' LEFT JOIN event_candidates m ON m.id=se.event_id LEFT JOIN raw_articles mr ON mr.id=m.article_id) SELECT * FROM contexts WHERE rn<=5 ORDER BY attempt_id,rn;"
           echo '=== MEMBERSHIP BARRIER ==='
           npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,a.ai_status,se.story_id,se.assignment_kind FROM story_match_attempts a LEFT JOIN story_events se ON se.event_id=a.event_id AND se.membership_status='active' WHERE a.id IN ($ids) ORDER BY a.id DESC;"
