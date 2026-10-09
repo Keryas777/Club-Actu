@@ -1,6 +1,6 @@
 import { clampInteger, cleanError } from './story-matching-core.js';
 
-export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v4';
+export const STORY_AI_PROMPT_VERSION = 'story-ai-ambiguity-v5';
 export const DEFAULT_STORY_AI_PROVIDER = 'workers_ai';
 export const DEFAULT_STORY_AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const DEFAULT_STORY_AI_LIMIT = 1;
@@ -145,10 +145,17 @@ export function buildStoryAiPrompt(input) {
         '(for example transfer rumor → negotiation → agreement → official announcement), but generic overlap in club, player or competition is not enough. ' +
         'Attach only when the new EVENT is clearly another update or report about the SAME CENTRAL DOSSIER, not merely something related to it. ' +
         'Ask: would an editor reasonably keep both EVENTs inside one evolving article/dossier without changing its central subject? If the answer is no, choose new_story. ' +
+        'ATTACH is the exceptional answer: require affirmative evidence that both EVENTs describe the same concrete episode, transaction, injury, decision or evolving dossier. If the evidence proves only that the subjects are related, choose new_story. ' +
         'Shared names are weak evidence: the same coach, player, club, competition, national team, date, or fixture can appear in several distinct STORYs. ' +
         'Different central people, transactions, decisions, injuries, disciplinary cases, supporter incidents or controversies are distinct subjects unless the supplied evidence clearly shows they are updates of one dossier. ' +
+        'A fixture is CONTEXT, not STORY identity. Match result/analysis/direct reaction may form a match-level STORY, but player availability, one player injury, one selection choice, one tactical choice, one press quote or one transfer angle before that fixture is a separate dossier unless both EVENTs concern the same concrete personnel/tactical issue. ' +
+        'For injuries: two different injured/unavailable players at the same club or in the same match are DIFFERENT STORYs unless both EVENTs are explicitly the same squad-injury roundup. ' +
+        'For transfers: two different targets/transactions are DIFFERENT STORYs even when the same club, sporting director or coach is involved. The same player is also insufficient when one EVENT is about a transfer and the other is about match performance, a reunion quote or another unrelated episode. ' +
+        'For a repeated person: same person does not mean same dossier. Injury history versus international playing time, or transfer future versus a pre-match quote, are DIFFERENT STORYs. ' +
+        'Calibration negatives from real audits: Todibo unavailable for Lens-OL vs Niakhaté injured for Lens-OL = DIFFERENT; Bidstrup knee concerns vs Bidstrup international-break minutes = DIFFERENT; Openda reunion/quote before Lens-OL vs OL negotiating his permanent transfer = DIFFERENT; an OM Bakola/Højbjerg transfer consequence vs an OM Da Cunha transfer failure merely sharing Benatia = DIFFERENT; Egan-Riley injury vs Højbjerg injury merely sharing OM/Genesio = DIFFERENT. ' +
+        'Calibration positives: two reports of De Ketelaere confirming the same PSG contact = SAME; two updates on the same Ferran Torres ankle problem = SAME; Niakhaté being ruled out and the resulting Fonseca defensive reshuffle for that absence = SAME. ' +
         'Concrete negative example: “Zidane may call Tolisso to France” and “Zidane plans a role for Cherki” are DIFFERENT STORYs despite sharing Zidane and an OL context. ' +
-        'Concrete match rule: line-ups, the result, match analysis and direct post-match reactions about that same fixture may belong to one match STORY. But a separate supporter-banner, crowd, security or disciplinary incident that merely occurs during that fixture is NOT automatically the match STORY; choose new_story when the incident itself is the central subject. ' +
+        'A supporter-banner, crowd, security or disciplinary incident that merely occurs during a fixture is NOT automatically the match STORY; choose new_story when the incident itself is the central subject. ' +
         'Choose new_story when it is a distinct subject. Choose unsure whenever the supplied evidence is insufficient or genuinely balanced. Never choose a story_id that is not supplied. ' +
         'For attach, evidence_event_ids must include the new EVENT id and at least one representative member EVENT id from the selected STORY; if no representative member is supplied, do not attach. ' +
         'The rationale must state the concrete identity link that makes the CENTRAL SUBJECT the same; wording such as merely “related to”, “linked to”, “same club/player” or “same match” is not sufficient justification. ' +
