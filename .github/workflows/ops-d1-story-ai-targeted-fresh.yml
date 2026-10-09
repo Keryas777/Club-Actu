@@ -20,35 +20,77 @@ jobs:
         with:
           node-version: 22
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Run selected fresh attempts one by one
+
+      - name: Refresh stale EVENTs and run V4 immediately
         env:
           MANUAL_TRIGGER_TOKEN: ${{ secrets.MANUAL_TRIGGER_TOKEN }}
           BASE_URL: https://club-actu.deliriousfan7.workers.dev
         run: |
           set -euo pipefail
-          ids='1509 1507 1502 1501 1496 1494 1492 1491 1490 1486 1485 1484 1483 1481 1478 1477 1475 1474 1473 1469'
-          for id in $ids; do
-            status="$(curl --silent --show-error --output "ai-$id.json" --write-out '%{http_code}' \
-              --request POST \
-              --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
-              --header 'Accept: application/json' \
-              "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$id")"
-            echo "=== ATTEMPT $id / HTTP $status ==="
-            cat "ai-$id.json"; echo
-            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then exit 20; fi
+          : > ai-attempt-ids.txt
+          events='eaefd9fd2507381c81720fd72a09a473076499a98895201aceabb678484da7a8 732c1cac66b3b6d1d424814228cb376b1a501d15372f1a42504cd5dedb40fa4e 9869d7e2af19325ffcc806fab60a5f968901d55af96933d2160a3310d987065f 7d00ee24ca6413fd7f110891fc3c9d6b512d2a0cbf2ef4ac2191123aa7714601 205b236282894aa169cdc2d8bcaa7994fce3dd5eb97b67f2f81d23f5f1969520 c6ac7b4df742450c80e54550d5c52fd2320aa8a94661ec22dd7f9b39a56f89b0 cb951424c5a347b2bdcfb24a31e126cec54cb4e512b5cf14fce7ab62931f50e5 7b1592f71dea074cf3a1ff8e4678feff20307dfa6b2a3a0f68c71cc904b2c842 cfba1abc4e93a30caa5a3854e127841283e20baecaa64a754fc0d1133ed165dc aeb86798d679251851be6fe5c6ede22a6d603df52d50eef726e4e932ce665218 45802244caa988b7843a2e1345eac335dc81cf7c26f0b51dee4e23e3dec51120 40f236e7522c6ce1549c3e8f43a93d50589bb3ee5582f98773ef4082d99125f2 de9775191eccf53cc451b3018d4c1f3f2d5e5b909fd6cc94d8ba1e50c64041e9 9aded60fc7d2972876016cbe153aa5a371c22baf7b413e8bb790b028fa3e5771 6a893fa2936dbde0392831dbb81ae0fcdd7ff6f28d3567fe5836116f18f654c2 98b3c28f2671310b44501ffa1df0c138b0e7c588bf228d84047a35ff83124ccf dec9cc38f32bb5e0004cf119ff7e8e06c872cc233382a47df6a5c4729779be35 1231d6933df5f80423a98f4f5af9e25c40bcbc3d2d15929e61840204cedf9bc0'
+          i=0
+          for event in $events; do
+            i=$((i+1))
+            curl --silent --show-error --fail               --request POST               --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN"               --header 'Accept: application/json'               "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "match-$i.json"
+
+            # Second targeted call is read/reuse only once the EVENT has reached a final matcher state.
+            curl --silent --show-error --fail               --request POST               --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN"               --header 'Accept: application/json'               "$BASE_URL/api/process-story-match-batch?limit=1&event_id=$event" > "lookup-$i.json"
+
+            python3 - "$i" "$event" <<'PY'
+          import json,sys
+          i,event=sys.argv[1:]
+          first=json.load(open(f'match-{i}.json',encoding='utf-8'))
+          lookup=json.load(open(f'lookup-{i}.json',encoding='utf-8'))
+          ex=(lookup.get('examples') or [{}])[0]
+          print(f"EVENT {event[:12]}… matcher: new={first.get('auto_new_story',0)} attach={first.get('auto_attach',0)} ambiguous={first.get('ambiguous_ai',0)} reused={lookup.get('reused',0)} final={ex.get('match_status')} attempt={ex.get('match_attempt_id')}")
+          PY
+
+            attempt_id="$(python3 - "$i" <<'PY'
+          import json,sys
+          d=json.load(open(f'lookup-{sys.argv[1]}.json',encoding='utf-8'))
+          e=(d.get('examples') or [{}])[0]
+          print(e.get('match_attempt_id') or '')
+          PY
+          )"
+            match_status="$(python3 - "$i" <<'PY'
+          import json,sys
+          d=json.load(open(f'lookup-{sys.argv[1]}.json',encoding='utf-8'))
+          e=(d.get('examples') or [{}])[0]
+          print(e.get('match_status') or '')
+          PY
+          )"
+
+            if [ "$match_status" = "ambiguous_ai" ] && [ -n "$attempt_id" ]; then
+              echo "$attempt_id" >> ai-attempt-ids.txt
+              curl --silent --show-error --fail                 --request POST                 --header "Authorization: Bearer $MANUAL_TRIGGER_TOKEN"                 --header 'Accept: application/json'                 "$BASE_URL/api/process-story-ai-batch?limit=1&attempt_id=$attempt_id" > "ai-$attempt_id.json"
+              python3 - "$attempt_id" <<'PY'
+          import json,sys
+          a=sys.argv[1]
+          d=json.load(open(f'ai-{a}.json',encoding='utf-8'))
+          e=(d.get('decisions') or [{}])[0]
+          print(f"  AI attempt {a}: outcome={e.get('outcome')} decision={e.get('decision')} story={e.get('story_id')} confidence={e.get('confidence')} rationale={e.get('rationale')}")
+          PY
+            fi
           done
-      - name: Audit decisions and evidence
+          echo "Fresh AI attempt ids:"
+          cat ai-attempt-ids.txt || true
+
+      - name: Audit fresh V4 decisions and evidence
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          ids='1509,1507,1502,1501,1496,1494,1492,1491,1490,1486,1485,1484,1483,1481,1478,1477,1475,1474,1473,1469'
-          echo '=== TARGETED RESULTS ==='
-          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.best_story_id,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,e.relation_from,e.relation_to,e.competition,e.opponents_json,r.source_id,r.title,substr(e.evidence_json,1,2200) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
-          echo '=== CANDIDATE SNAPSHOTS ==='
-          npx wrangler d1 execute DB --remote --command "SELECT id attempt_id,event_id,best_story_id,substr(candidates_json,1,12000) candidates_json FROM story_match_attempts WHERE id IN ($ids) ORDER BY id DESC;"
-          echo '=== CHOSEN/BEST STORY CONTEXT ==='
-          npx wrangler d1 execute DB --remote --command "WITH reviewed AS (SELECT a.id attempt_id,a.event_id,a.best_story_id,json_extract(a.ai_response_json,'$.decision') ai_decision,json_extract(a.ai_response_json,'$.story_id') ai_story_id,json_extract(a.ai_response_json,'$.confidence') confidence,json_extract(a.ai_response_json,'$.evidence_event_ids') evidence_ids FROM story_match_attempts a WHERE a.id IN ($ids) AND a.ai_status='review_pending'), contexts AS (SELECT reviewed.*,COALESCE(reviewed.ai_story_id,reviewed.best_story_id) context_story_id,se.event_id member_event_id,m.family member_family,m.stage member_stage,m.primary_people_json member_people,m.primary_clubs_json member_clubs,m.relation_from member_from,m.relation_to member_to,m.competition member_competition,m.opponents_json member_opponents,mr.source_id member_source,mr.title member_title,substr(m.evidence_json,1,2200) member_evidence,ROW_NUMBER() OVER (PARTITION BY reviewed.attempt_id ORDER BY CASE WHEN instr(COALESCE(reviewed.evidence_ids,''),se.event_id)>0 THEN 0 ELSE 1 END,se.assigned_at DESC,se.event_id) rn FROM reviewed LEFT JOIN story_events se ON se.story_id=COALESCE(reviewed.ai_story_id,reviewed.best_story_id) AND se.membership_status='active' LEFT JOIN event_candidates m ON m.id=se.event_id LEFT JOIN raw_articles mr ON mr.id=m.article_id) SELECT * FROM contexts WHERE rn<=5 ORDER BY attempt_id,rn;"
+          fresh="$(paste -sd, ai-attempt-ids.txt || true)"
+          if [ -n "$fresh" ]; then ids="1492,1474,$fresh"; else ids="1492,1474"; fi
+          echo "AUDIT_IDS=$ids"
+
+          echo '=== REVIEW RESULTS ==='
+          npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,ROUND(a.best_hybrid_score,6) hybrid,a.family_compatible,a.best_story_id,a.ai_status,a.ai_prompt_version,a.ai_error_code,a.ai_response_json,e.family,e.stage,e.primary_people_json people,e.primary_clubs_json clubs,e.relation_from,e.relation_to,e.competition,e.opponents_json,r.source_id,r.title,substr(e.evidence_json,1,1800) evidence FROM story_match_attempts a JOIN event_candidates e ON e.id=a.event_id JOIN raw_articles r ON r.id=e.article_id WHERE a.id IN ($ids) ORDER BY a.id DESC;"
+
+          echo '=== TOP CANDIDATES / REPRESENTATIVE MEMBERS ==='
+          npx wrangler d1 execute DB --remote --command "WITH aa AS (SELECT * FROM story_match_attempts WHERE id IN ($ids) AND ai_status='review_pending'), cand AS (SELECT aa.id attempt_id,CAST(j.key AS INTEGER) candidate_rank,j.value candidate_json,json_extract(j.value,'$.story_id') story_id,json_extract(j.value,'$.hybrid') hybrid,json_extract(j.value,'$.embedding') embedding,json_extract(j.value,'$.lexical') lexical,json_extract(j.value,'$.temporal') temporal FROM aa,json_each(aa.candidates_json) j WHERE CAST(j.key AS INTEGER)<4 AND json_extract(j.value,'$.shortlist_pass')=1), mem AS (SELECT cand.*,CAST(m.key AS INTEGER) member_rank,json_extract(m.value,'$.event_id') member_event_id FROM cand,json_each(json_extract(cand.candidate_json,'$.shortlist_members')) m WHERE CAST(m.key AS INTEGER)<3) SELECT mem.attempt_id,mem.candidate_rank,mem.story_id,ROUND(mem.hybrid,6) hybrid,ROUND(mem.embedding,6) embedding,ROUND(mem.lexical,6) lexical,ROUND(mem.temporal,6) temporal,mem.member_rank,mem.member_event_id,e.family member_family,e.stage member_stage,e.primary_people_json member_people,e.primary_clubs_json member_clubs,r.source_id member_source,r.title member_title,substr(e.evidence_json,1,1400) member_evidence FROM mem LEFT JOIN event_candidates e ON e.id=mem.member_event_id LEFT JOIN raw_articles r ON r.id=e.article_id ORDER BY mem.attempt_id DESC,mem.candidate_rank,mem.member_rank;"
+
           echo '=== MEMBERSHIP BARRIER ==='
           npx wrangler d1 execute DB --remote --command "SELECT a.id attempt_id,a.event_id,a.ai_status,se.story_id,se.assignment_kind FROM story_match_attempts a LEFT JOIN story_events se ON se.event_id=a.event_id AND se.membership_status='active' WHERE a.id IN ($ids) ORDER BY a.id DESC;"
