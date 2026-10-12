@@ -1063,7 +1063,7 @@ async function refreshArticleProcessingStatus(db, articleId, sourceContentHash) 
        SUM(CASE WHEN decision = 'relevant' THEN 1 ELSE 0 END) AS relevant,
        SUM(CASE WHEN decision = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
        SUM(CASE WHEN decision = 'rejected' THEN 1 ELSE 0 END) AS rejected
-     FROM article_club_assessments
+     FROM article_club_assessments INDEXED BY idx_article_club_assessments_article
      WHERE article_id = ?
        AND source_content_hash = ?
        AND rule_version = ?`
