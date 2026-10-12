@@ -82,11 +82,21 @@ jobs:
           python3 - <<'PY'
           import json
           raw=json.load(open('content-enrichment/candidates-raw.json'))
+          responses=raw if isinstance(raw,list) else [raw]
           rows=[]
-          for item in raw if isinstance(raw,list) else [raw]:
-              rows.extend((item or {}).get('results') or [])
+          reads=[]
+          for item in responses:
+              if not isinstance(item,dict):
+                  continue
+              rows.extend(item.get('results') or [])
+              meta=item.get('meta') or {}
+              if meta.get('rows_read') is not None:
+                  reads.append(int(meta['rows_read']))
           json.dump(rows,open('content-enrichment/candidates.json','w'),ensure_ascii=False)
-          print(f'candidates={len(rows)}')
+          metrics={'rows_read':sum(reads) if len(reads)==len(responses) else None,
+                   'statements':len(responses)}
+          json.dump(metrics,open('content-enrichment/candidate-d1-metrics.json','w'))
+          print(f"candidates={len(rows)} d1_candidate_rows_read={metrics['rows_read']}")
           PY
 
       - name: Extract article bodies
@@ -106,9 +116,14 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
           d=json.load(open('content-enrichment/summary.json'))
+          metrics=json.load(open('content-enrichment/candidate-d1-metrics.json'))
           print('# Club Actu — full-content enrichment')
           print()
           print(f"Candidates: **{d['candidates']}**")
+          reads=metrics.get('rows_read')
+          print(f"D1 candidate SELECT rows read: **{reads:,}**" if reads is not None
+                else "D1 candidate SELECT rows read: **unavailable (missing Cloudflare metadata)**")
+          print(f"D1 candidate SELECT response statements: **{metrics['statements']}**")
           print()
           print('| Source | Completed | Retry | Failed | Median chars |')
           print('|---|---:|---:|---:|---:|')
@@ -123,6 +138,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: article-content-enrichment-${{ github.run_id }}
-          path: content-enrichment/summary.json
+          path: |
+            content-enrichment/summary.json
+            content-enrichment/candidate-d1-metrics.json
           if-no-files-found: error
           retention-days: 14
